@@ -52,6 +52,12 @@ CONFIG=outputs/wf_cmd_gpu_20261114_203000_123456/pipeline_config.json \
 | `scripts/wf_cmd_pipeline.sh`（新） | 服务器上的一键流程 |
 | `tests/test_wf_command_gpu.py`（新） | 配置、执行器参数、Warp/CPU 一致性、参考生成 |
 | `pyproject.toml` | 新增 `gpu` extra，以及 `sm-wf-command-refs`、`sm-wf-warp-check` 两个入口 |
+| `src/supermimic/wf/goal_trajectory.py`（新，第二轮） | 按 level 生成末端目标轨迹库；训练和评估共用的 Ta/Tb 调度器 |
+| `evaluate.py`、`train.py`、`guard.py`、`config.py`（第二轮） | 新增 `trajectory` 配置组和跟踪成功率指标；`curriculum.metric`；守卫新增 `success_metric`、`success_tolerance`、`rejection_lr_factor` |
+| `scripts/prepare_wf_run.py`、`wf_cmd_pipeline.sh`（第二轮） | 阶段 1 同时生成轨迹库，放在本次运行的参考目录下 |
+| `tests/test_wf_trajectory.py`（新，第二轮） | 调度节奏、`mode=0` 和 `mode=1` 的坐标系、选最近候选、守卫容差、生成器 |
+
+**轨迹库使用的配置（`configs/examples/wf_cmd_gpu4096.json`）**：`trajectory.library` 由 `prepare_wf_run.py` 自动改写到 `<参考目录>/trajectories`。`TRAJ_PER_LEVEL` 环境变量控制每个 level 生成多少条轨迹（默认 256）。
 
 **注意**：修正执行器参数后 physics hash 变了。以前用旧代码训练出的 checkpoint 不能再用新模型续训或评估。
 
@@ -112,7 +118,49 @@ python -m supermimic.wf.command_reference --config configs/examples/wf_cmd_gpu40
 
 ---
 
+## 3b. 阶段 1：末端目标轨迹库（Ta/Tb 调度）
+
+配置里设置了 `trajectory.library` 时，阶段 1 会在参考目录下额外生成 `trajectories/`：
+
+```bash
+python -m supermimic.wf.goal_trajectory --config configs/examples/wf_cmd_gpu4096.json \
+    --output outputs/wf_cmd_refs/trajectories --per-level 256 --workers 32
+```
+
+**生成方式**：每个 level 在关节空间采样一串经过碰撞检查的航点，用三次样条连成平滑轨迹，并按速度上限做时间拉伸。轨迹以控制周期采样，每个采样点都做碰撞检查，再用 FK 转成跟随坐标系（`goal_follow_frame`）下的末端位姿序列。每条轨迹默认 16 秒（800 个采样点）。
+
+| level | 关节幅度系数 | 关节速度上限 | 末端线速度上限 | 末端角速度上限 | 实测末端活动范围（中位数） |
+|---|---|---|---|---|---|
+| 0 | 0.15 | 0.25 rad/s | 0.04 m/s | 0.20 rad/s | 0.07 m |
+| 1 | 0.35 | 0.40 | 0.08 | 0.35 | 0.17 m |
+| 2 | 0.60 | 0.60 | 0.12 | 0.50 | 0.24 m |
+| 3 | 1.00 | 0.80 | 0.16 | 0.70 | 0.49 m |
+
+**训练中的调度**（`trajectory` 配置组）：
+
+- 每回合以 `fraction=0.8` 的概率启用轨迹，其余回合沿用单点静态目标。
+- 每 `segment_steps=250` 步（Ta = 5 s）从库中取一段新窗口。轨迹从"当前课程 level"中抽取，有 30% 的概率改从更低的 level 中抽取。抽 16 个候选，选起点离当前末端最近的一条，避免目标跳变。
+- 每 `update_steps=5` 步（Tb = 0.1 s）把窗口当前时刻的位姿写进 command 的前 7 维。`mode=1` 时相对当前机身坐标系，`mode=0` 时相对这一段开始时的坐标系（相当于世界系下运动的目标）。
+- Actor 的输入格式不变，仍是 11 维；部署时不需要轨迹库。
+
+**评估指标**：`tracking_success_rate` 是去掉前 `tracking_grace_steps=50` 步之后，满足以下条件的帧占整个评估时长的比例：末端位置 ≤ 3 cm、姿态 ≤ 0.15 rad，`mode=1` 时底盘速度误差也在容差内。失败之后没执行的帧算作未命中。另外还输出 `tracking_rms_position_error_m` 和 `tracking_rms_orientation_error_rad`。课程升级（阈值 0.6）和守卫都用这个指标。`evaluate` 默认使用 checkpoint 配置里的轨迹库；加 `--static-goals` 可以回到单点目标评估。
+
+**限制**：策略只能看到当前目标点，看不到目标速度，想象展开时目标也保持静止，所以跟踪运动目标会有滞后。因此轨迹速度设得较低。之后可以考虑把目标速度加进观测做前馈。
+
+---
+
 ## 4. 阶段 2：训练
+
+### 针对 2026-11-14 运行结果的修正
+
+| 现象（`outputs/wf_cmd_gpu*`） | 原因 | 修改 |
+|---|---|---|
+| `…203738`：第 1000/2000/3000 步的验证结果完全相同；守卫 5 次中 5 次拒绝 | 守卫只比较回报。失败率从 25% 降到 0 的候选，因为回报低了 0.2 也被拒绝；每次拒绝学习率减半，降到 0.05 倍 | `prefer_safety`（失败率降低就接受），`prefer_success` 加 `success_tolerance=0.03`，`score_tolerance=0.1`，`rejection_lr_factor=0.7`，`min_lr_scale=0.25`；每 250 次迭代检查一次，每次 32 个回合 |
+| BC 后的基线失败率为 94% / 25% / 75%，三次运行差别很大 | 按离线动作损失挑选的 BC 结果在闭环中不稳定 | `demonstrations.physical_selection_interval=500`：在留出 clip 上做真实物理回放，按回放结果挑选 |
+| level 1 姿态误差 0.2–0.26 rad，阈值 0.15 | 姿态奖励在 0.2 rad 附近几乎没有梯度 | `orientation_scales=[0.5, 0.15]`，`position_scales` 增加 0.02 m 一档 |
+| `level2` 视频中 vx 误差 0.12、wz 误差 0.19 | 视频用的指令 `[0.3, 0, 0.3]` 中，wz 是训练上限 0.06 的 5 倍；vx=0.3 在第 3000 次迭代时还没进入速度课程（第 6000 次之前上限是 0.1） | 属于超出训练分布，不是 bug |
+
+`wf_cmd_gpu`（第 3000 次迭代，level 0）本身已经能用：静态目标 94% 成功，底盘速度误差约 0.002 m/s，末端误差约 1 cm。下次分析时请一并提供 `metrics.jsonl`、`train.log` 和 `reference_pretrain.jsonl`，这次的记录里没有这几个文件。
 
 ```bash
 python -m supermimic.wf.train --config configs/examples/wf_cmd_gpu4096.json

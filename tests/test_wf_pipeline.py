@@ -147,6 +147,11 @@ def fake_python(tmp_path):
                 assert Path(config["demonstrations"]["directory"]) == library
                 library.mkdir(parents=True)
                 (library / "manifest.json").write_text("{}")
+            elif module == "supermimic.wf.goal_trajectory":
+                output = Path(option("--output"))
+                assert Path(record["config"]["trajectory"]["library"]) == output
+                output.mkdir(parents=True)
+                (output / "manifest.json").write_text("{}")
             elif module == "supermimic.wf.train":
                 config = record["config"]
                 assert (Path(config["demonstrations"]["directory"]) / "manifest.json").is_file()
@@ -269,3 +274,20 @@ def test_shell_pipeline_later_stages_reuse_selected_config(fake_python, tmp_path
         if "--checkpoint" in call["args"]:
             assert Path(argument(call, "--checkpoint")) == checkpoint
     assert snapshot.read_bytes() == before
+
+
+def test_shell_pipeline_generates_trajectory_library_next_to_references(fake_python, tmp_path):
+    env, log = fake_python
+    source, config = write_config(tmp_path / "runs")
+    config["trajectory"] = {"library": "old/trajectories", "segment_steps": 250}
+    source.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+    env.update(CONFIG=str(source), REFS=str(tmp_path / "refs"))
+    run_pipeline(1, 2, env)
+    calls = read_calls(log)
+    reference = next(call for call in calls if call["module"].endswith(".command_reference"))
+    trajectory = next(call for call in calls if call["module"].endswith(".goal_trajectory"))
+    train = next(call for call in calls if call["module"].endswith(".train"))
+    references = Path(argument(reference, "--output"))
+    assert Path(argument(trajectory, "--output")) == references / "trajectories"
+    assert Path(train["config"]["trajectory"]["library"]) == references / "trajectories"
+    assert train["config"]["trajectory"]["segment_steps"] == 250

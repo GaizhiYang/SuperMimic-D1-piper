@@ -51,7 +51,8 @@ class PolicyGuard:
                      "hold_steps", "friction", "ablation", "reset_settle_steps", "goal_seed_device","initial_condition_hash")
 
     def __init__(self, return_tolerance=0.01, failure_slack=0.,
-                 rejection_lr_factor=.5, min_lr_scale=.01, prefer_success=False,prefer_safety=False):
+                 rejection_lr_factor=.5, min_lr_scale=.01, prefer_success=False,prefer_safety=False,
+                 success_key="final_held_success_rate", success_tolerance=0.):
         if not math.isfinite(return_tolerance) or return_tolerance < 0:
             raise ValueError("return_tolerance must be finite and nonnegative")
         if not 0 <= failure_slack <= 1:
@@ -64,6 +65,12 @@ class PolicyGuard:
         self.min_lr_scale = float(min_lr_scale)
         self.prefer_success = bool(prefer_success)
         self.prefer_safety = bool(prefer_safety)
+        self.success_key = str(success_key)
+        if not 0 <= success_tolerance < 1:
+            raise ValueError("success_tolerance must be in [0, 1)")
+        # Continuous success statistics (e.g. tracking fractions) carry
+        # evaluation noise; a small band avoids rejecting equivalent candidates.
+        self.success_tolerance = float(success_tolerance)
         self.learning_rate_scale = 1.
         self.accepted = 0
         self.rejected = 0
@@ -84,10 +91,9 @@ class PolicyGuard:
             return None
         return score, failure
 
-    @staticmethod
-    def _success(evaluation):
+    def _success(self, evaluation):
         try:
-            value = float(evaluation["final_held_success_rate"])
+            value = float(evaluation[self.success_key])
         except (KeyError, TypeError, ValueError):
             return None
         return value if math.isfinite(value) and 0 <= value <= 1 else None
@@ -121,9 +127,9 @@ class PolicyGuard:
         if self.prefer_safety and failure<self.best_failure-1e-12:
             return True,'physical_safety_improved'
         if self.prefer_success:
-            if success < self.best_success-1e-12:
+            if success < self.best_success-self.success_tolerance-1e-12:
                 return False, "held_success_regression"
-            if success > self.best_success+1e-12:
+            if success > self.best_success+self.success_tolerance+1e-12:
                 return True, "held_success_improved"
         if score < self.best_return-self.return_tolerance:
             return False, "real_return_regression"
@@ -186,7 +192,7 @@ class PolicyGuard:
             self._baseline = _snapshot(evaluation)
             # Tolerance is relative to the historical high water mark. Repeated
             # small accepted decreases cannot silently drift without a bound.
-            if safer or (self.prefer_success and success > self.best_success+1e-12):
+            if safer or (self.prefer_success and success > self.best_success+self.success_tolerance+1e-12):
                 # A new success tier gets its own dense-return reference. A high
                 # reward from a less successful tier cannot permanently block it.
                 self.best_return = score

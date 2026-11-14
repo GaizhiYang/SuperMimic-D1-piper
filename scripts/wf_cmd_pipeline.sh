@@ -12,7 +12,7 @@
 # Including stage 1 starts a fresh run with matching timestamped output folders.
 # Continue an existing run with CONFIG=outputs/<run>/pipeline_config.json and stage 2+.
 # Env:    CONFIG (default configs/examples/wf_cmd_gpu4096.json), REFS (reference path prefix),
-#         REF_COUNT (512), WORKERS (nproc-1), CUDA_VISIBLE_DEVICES, WFARM_ASSET_DIR
+#         REF_COUNT (512), TRAJ_PER_LEVEL (256), WORKERS (nproc-1), CUDA_VISIBLE_DEVICES, WFARM_ASSET_DIR
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -25,6 +25,7 @@ fi
 CONFIG=${CONFIG:-configs/examples/wf_cmd_gpu4096.json}
 REFS=${REFS:-outputs/wf_cmd_refs}
 REF_COUNT=${REF_COUNT:-512}
+TRAJ_PER_LEVEL=${TRAJ_PER_LEVEL:-256}
 WORKERS=${WORKERS:-$(( $(nproc) > 1 ? $(nproc) - 1 : 1 ))}
 if (( FIRST <= 1 && 1 <= LAST )); then
   CONFIG=$(python scripts/prepare_wf_run.py --config "$CONFIG" --refs-base "$REFS")
@@ -32,6 +33,7 @@ fi
 OUT=$(python -c "import json,sys;print(json.load(open(sys.argv[1]))['output'])" "$CONFIG")
 LIB=$(python -c "import json,sys;print(json.load(open(sys.argv[1]))['demonstrations']['directory'])" "$CONFIG")
 REFS=$(python -c "from pathlib import Path;import sys;print(Path(sys.argv[1]).parent)" "$LIB")
+TRAJ=$(python -c "import json,sys;print((json.load(open(sys.argv[1])).get('trajectory') or {}).get('library') or '')" "$CONFIG")
 export WFARM_ASSET_DIR=${WFARM_ASSET_DIR:-$PWD/wf-arm-tbot}
 
 run() { echo "+ $*" >&2; "$@"; }
@@ -39,6 +41,7 @@ run() { echo "+ $*" >&2; "$@"; }
 echo "Pipeline config: $CONFIG"
 echo "Training output: $OUT"
 echo "Reference library: $LIB"
+echo "Trajectory library: ${TRAJ:-<none: static TCP goals>}"
 
 if (( FIRST <= 0 && 0 <= LAST )); then
   run python -m pytest -q tests/test_release_core.py
@@ -50,6 +53,10 @@ fi
 if (( FIRST <= 1 && 1 <= LAST )); then
   run python -m supermimic.wf.command_reference --config "$CONFIG" --output "$REFS" \
       --count "$REF_COUNT" --workers "$WORKERS"
+  if [[ -n "$TRAJ" ]]; then
+    run python -m supermimic.wf.goal_trajectory --config "$CONFIG" --output "$TRAJ" \
+        --per-level "$TRAJ_PER_LEVEL" --workers "$WORKERS"
+  fi
 fi
 
 if (( FIRST <= 2 && 2 <= LAST )); then

@@ -30,8 +30,16 @@ def physical_failure(task, state, metrics):
 def evaluate_policy(actor, task, model, spec, *, episodes=16, level=0, seed=10000,
                     steps=600, hold_steps=15, dt=0.02, friction=1.0, ablation="none", goals=None,
                     settle_steps=0, goal_seed_device="policy",initial_states=None,initial_actions=None,
-                    arm_initial_position=None, frame_callback=None):
+                    arm_initial_position=None, frame_callback=None, trajectories=None, trajectory_cfg=None):
     """Evaluate real physics; an optional callback observes each post-step scene.
+
+    With ``trajectories`` (a TrajectoryLibrary) and ``trajectory_cfg``, the TCP
+    part of every command follows the Ta/Tb trajectory schedule used in
+    training (deterministic for a given seed) and per-step tracking metrics are
+    reported: ``tracking_success_rate`` is the fraction of all post-grace steps
+    of the budget (unexecuted steps after a failure count as misses) whose TCP
+    pose is within the success tolerances and, in mode 1, whose base velocity
+    is within the command tolerances. TCP speed is not required to vanish.
 
     ``frame_callback(sim, goals, step, metrics)`` runs before failed worlds reset,
     so recordings include the actual terminal state. Callbacks must not mutate
@@ -79,6 +87,13 @@ def evaluate_policy(actor, task, model, spec, *, episodes=16, level=0, seed=1000
     needs_context=task.cfg.program_context and goals.shape[-1]!=37
     goals=task.command_goal(goals)
     if needs_context:goals=task.initialize_goal(s0,goals)
+    schedule=None
+    if trajectories is not None:
+        from .goal_trajectory import TrajectorySchedule
+        schedule=TrajectorySchedule(trajectories,trajectory_cfg,task.cfg.goal_follow_frame,episodes,device,
+                                    generator=torch.Generator().manual_seed(seed+7))
+        schedule.cfg=replace(trajectory_cfg,fraction=1.)  # every evaluation episode follows a trajectory
+        goals=schedule.start(torch.arange(episodes,device=device),s0,goals,level,task.tcp_pose(s0))
     initial_goals=goals.clone()
     # All interventions start from the same freely settled state and world goals.
     # A physical base weld anchors that state instead of pulling it back upward
@@ -133,6 +148,8 @@ def evaluate_policy(actor, task, model, spec, *, episodes=16, level=0, seed=1000
     base_linear_error,base_angular_error=counts.clone(),counts.clone()
     final_base_velocity=torch.zeros(episodes,3,device=device)
     tail_base_velocity=final_base_velocity.clone();tail_base_error2=counts.clone();tail_base_counts=counts.clone()
+    grace=int(trajectory_cfg.tracking_grace_steps) if schedule is not None else 0
+    track_hits,track_pos2,track_rot2,track_counts=counts.clone(),counts.clone(),counts.clone(),counts.clone()
     input_mode = actor.training
     actor.eval()
     for step in range(steps):
@@ -143,6 +160,8 @@ def evaluate_policy(actor, task, model, spec, *, episodes=16, level=0, seed=1000
         executed = torch.as_tensor(sim.applied_action, dtype=torch.float32, device=device)
         physical = sim.metrics()
         goals=task.step_goal(state,sn,goals)
+        if schedule is not None:
+            goals=schedule.step(sn,goals,level,task.tcp_pose(sn),alive=alive)
         rewards = task.reward(sn, executed, previous, goals)
         if task.cfg.base_command_conditioning:
             command_error=task.base_command_error(sn,goals)
@@ -161,6 +180,16 @@ def evaluate_policy(actor, task, model, spec, *, episodes=16, level=0, seed=1000
         best_hold = torch.maximum(best_hold, hold)
         first_hold = torch.where((hold >= hold_steps) & (first_hold < 0), step + 1, first_hold)
         pe, re = rewards["position_error"], rewards["orientation_error"]
+        if schedule is not None and step>=grace:
+            within=(pe<=task.cfg.success_position)&(re<=task.cfg.success_orientation)
+            if task.cfg.base_command_conditioning:
+                error=task.base_command_error(sn,goals)
+                base_ok=(error[...,:2].norm(dim=-1)<=task.cfg.success_base_linear)&(error[...,2].abs()<=task.cfg.success_base_angular)
+                within&=(goals[...,10]<.5)|base_ok
+            live=alive&~now_failed
+            track_hits+=(within&safe&live).float()
+            track_pos2+=torch.where(live,pe.square(),0.);track_rot2+=torch.where(live,re.square(),0.)
+            track_counts+=live.float()
         final_pos = torch.where(alive, pe, final_pos)
         final_rot = torch.where(alive, re, final_rot)
         final_linear_speed = torch.where(alive, rewards["tcp_speed"], final_linear_speed)
@@ -229,6 +258,12 @@ def evaluate_policy(actor, task, model, spec, *, episodes=16, level=0, seed=1000
             "max_torque_limit_fraction": float(torque_fraction_max[i]),
             "max_joint_limit_violation_rad": float(limit_max[i]),
         })
+        if schedule is not None:
+            budget=max(1,steps-grace)
+            records[-1].update(tracking_success_fraction=float(track_hits[i]/budget),
+                tracking_rms_position_error_m=float((track_pos2[i]/track_counts[i].clamp_min(1)).sqrt()),
+                tracking_rms_orientation_error_rad=float((track_rot2[i]/track_counts[i].clamp_min(1)).sqrt()),
+                trajectory_level=int(trajectories.levels[schedule.traj[i]]))
         if task.cfg.base_command_conditioning:
             records[-1].update(final_world_goal=goals[i,:7].cpu().tolist(),
                 final_base_linear_command_error_m_s=float(base_linear_error[i]),
@@ -263,16 +298,23 @@ def evaluate_policy(actor, task, model, spec, *, episodes=16, level=0, seed=1000
         "records": records,
     }
     if fixture_hash:result['initial_condition_hash']=fixture_hash
+    if schedule is not None:
+        result.update(goal_source='trajectory_library',trajectory_library_fingerprint=trajectories.fingerprint,
+            trajectory_schedule=asdict(trajectory_cfg),
+            tracking_success_rate=mean('tracking_success_fraction'),
+            tracking_rms_position_error_m=float(np.sqrt(np.mean([r['tracking_rms_position_error_m']**2 for r in records]))),
+            tracking_rms_orientation_error_rad=float(np.sqrt(np.mean([r['tracking_rms_orientation_error_rad']**2 for r in records]))))
     return result
 
 
 def config_from_dict(raw):
-    from .config import CurriculumConfig, DemonstrationConfig, GuardConfig, ModelConfig, PolicyConfig, SimConfig
+    from .config import (CurriculumConfig, DemonstrationConfig, GuardConfig, ModelConfig, PolicyConfig,
+                         SimConfig, TrajectoryConfig)
     raw = dict(raw)
     for name, cls in (("sim", SimConfig), ("model", ModelConfig),
                       ("policy", PolicyConfig), ("curriculum", CurriculumConfig),
                       ("reward", WholeBodyRewardCfg), ("guard", GuardConfig),
-                      ("demonstrations", DemonstrationConfig)):
+                      ("demonstrations", DemonstrationConfig), ("trajectory", TrajectoryConfig)):
         if isinstance(raw.get(name), dict):
             raw[name] = cls(**raw[name])
     return TrainConfig(**raw)
@@ -293,6 +335,8 @@ def main():
     p.add_argument('--reference-library',help='Evaluate actual reference starting states, previous commands and fixed goals')
     p.add_argument('--reference-split',choices=('train','validation','all'),default='validation')
     p.add_argument("--ablation", choices=("none", "base_locked", "legs_locked", "arm_locked", "all"), default="none")
+    p.add_argument("--trajectory-library", help="override the checkpoint's trajectory.library")
+    p.add_argument("--static-goals", action="store_true", help="ignore the trajectory library; one static goal per episode")
     p.add_argument("--output", default="logs/wf_goal/eval.json")
     args = p.parse_args()
     torch.set_num_threads(4)
@@ -320,13 +364,19 @@ def main():
         initial=dict(initial_states=demos.states[rows,0],initial_actions=demos.initial_action[rows])
     if explicit_goals is not None:
         args.episodes = len(explicit_goals)
+    trajectory={}
+    library=args.trajectory_library or cfg.trajectory.library
+    if library and not args.static_goals and explicit_goals is None:
+        from .goal_trajectory import TrajectoryLibrary
+        trajectory=dict(trajectories=TrajectoryLibrary(library,task,ck['manifest']['physics_hash'],cfg.sim.dt,args.device),
+                        trajectory_cfg=cfg.trajectory)
     modes = ("none", "base_locked", "legs_locked", "arm_locked") if args.ablation == "all" else (args.ablation,)
     results = [evaluate_policy(actor, task, model, spec, episodes=args.episodes, level=args.level,
         seed=args.seed, steps=args.steps or cfg.sim.episode_steps,
         hold_steps=cfg.curriculum.hold_steps, dt=cfg.sim.dt, friction=args.friction,
         ablation=mode, goals=explicit_goals, settle_steps=cfg.sim.reset_settle_steps,
         goal_seed_device=cfg.curriculum.goal_seed_device,
-        arm_initial_position=cfg.sim.arm_initial_position,**initial) for mode in modes]
+        arm_initial_position=cfg.sim.arm_initial_position,**initial,**trajectory) for mode in modes]
     for result in results:
         result.update(checkpoint=str(Path(args.checkpoint).resolve()), checkpoint_iteration=ck["iteration"],
                       physics_hash=ck["manifest"]["physics_hash"])

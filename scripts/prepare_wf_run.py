@@ -34,6 +34,9 @@ def prepare_run(config_path, refs_base) -> Path:
         break
     config["output"] = str(output)
     config.setdefault("demonstrations", {})["directory"] = str(references / "library")
+    # A configured TCP trajectory library is regenerated next to the references.
+    if (config.get("trajectory") or {}).get("library"):
+        config["trajectory"]["library"] = str(references / "trajectories")
     # A new stage-1 run starts fresh, even if its template came from a resumed
     # trainer's config.json. Explicit dynamics warm starts remain configured.
     config["resume"] = None

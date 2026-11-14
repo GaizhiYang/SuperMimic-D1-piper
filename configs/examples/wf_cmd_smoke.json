@@ -140,11 +140,12 @@
     "max_level": 3,
     "eval_interval": 20,
     "eval_episodes": 2,
-    "promote_success_rate": 0.75,
+    "promote_success_rate": 0.6,
     "promote_checks": 2,
     "hold_steps": 15,
     "goal_seed_device": "cpu",
-    "evaluation_device": "cpu"
+    "evaluation_device": "cpu",
+    "metric": "tracking_success_rate"
   },
   "reward": {
     "goal_orientation_frame": "tcp",
@@ -172,19 +173,27 @@
     "success_base_linear": 0.025,
     "success_base_angular": 0.03,
     "position_scales": [
+      0.02,
       0.08,
       0.25,
       0.8
     ],
     "position_weights": [
+      1.0,
       2.0,
       1.0,
       0.5
     ],
     "orientation_scale": 0.5,
     "orientation_weight": 0.7,
-    "orientation_scales": [],
-    "orientation_weights": [],
+    "orientation_scales": [
+      0.5,
+      0.15
+    ],
+    "orientation_weights": [
+      0.4,
+      0.6
+    ],
     "arrival_speed_scale": 0.15,
     "arrival_weight": 0.3,
     "tilt_free_angle": 0.35,
@@ -250,15 +259,18 @@
     "enabled": true,
     "interval": 20,
     "episodes": 2,
-    "score_tolerance": 0.01,
+    "score_tolerance": 0.1,
     "allowed_failure_increase": 0.0,
-    "min_lr_scale": 0.05,
+    "min_lr_scale": 0.25,
     "rollback_critic": true,
     "backtrack_alphas": [],
-    "prefer_success": false,
-    "prefer_safety": false,
+    "prefer_success": true,
+    "prefer_safety": true,
     "reference_episodes": 1,
-    "reference_anchor_episodes": 0
+    "reference_anchor_episodes": 0,
+    "success_metric": "tracking_success_rate",
+    "rejection_lr_factor": 0.7,
+    "success_tolerance": 0.05
   },
   "demonstrations": {
     "directory": "outputs/wf_cmd_refs_smoke/library",
@@ -272,7 +284,7 @@
     "tracking_in_critic": true,
     "decay_updates": 50,
     "observation_noise_std": 0.02,
-    "physical_selection_interval": 0,
+    "physical_selection_interval": 10,
     "validation_interval": 10,
     "model_pretrain_updates": 20,
     "hold_weight": 0.0,
@@ -289,5 +301,14 @@
     "zero_start_sampling_fraction": 0.0,
     "broad_anchor_sampling_fraction": 0.0,
     "validate_initial_states": false
+  },
+  "trajectory": {
+    "library": "outputs/wf_cmd_refs_smoke/trajectories",
+    "fraction": 0.8,
+    "segment_steps": 100,
+    "update_steps": 5,
+    "continuity_candidates": 16,
+    "lower_level_fraction": 0.3,
+    "tracking_grace_steps": 50
   }
 }

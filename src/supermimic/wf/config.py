@@ -114,6 +114,9 @@ class CurriculumConfig:
     hold_steps: int = 15
     goal_seed_device: str = "policy"  # "cpu" gives identical CPU/CUDA fixtures.
     evaluation_device: str = "policy"
+    # Promotion statistic: "final_held_success_rate" (static goals) or
+    # "tracking_success_rate" (trajectory targets).
+    metric: str = "final_held_success_rate"
 
 
 @dataclass
@@ -131,6 +134,9 @@ class GuardConfig:
     prefer_safety: bool = False
     reference_episodes: int = 0
     reference_anchor_episodes: int = 0
+    success_metric: str = "final_held_success_rate"  # used by prefer_success
+    success_tolerance: float = 0.  # accepted decrease of the success metric (evaluation noise band)
+    rejection_lr_factor: float = .5
 
 
 @dataclass
@@ -166,6 +172,18 @@ class DemonstrationConfig:
 
 
 @dataclass
+class TrajectoryConfig:
+    """Moving TCP targets from an offline body-frame trajectory library."""
+    library: str | None = None  # directory with manifest.json + trajectories.npz
+    fraction: float = 1.0  # share of episodes that follow trajectories (others: static goals)
+    segment_steps: int = 250  # Ta: draw a new trajectory window every Ta control steps
+    update_steps: int = 5  # Tb: write the window's current pose into the command every Tb steps
+    continuity_candidates: int = 16  # choose the candidate window starting nearest the TCP
+    lower_level_fraction: float = .3  # draw from any level <= current curriculum level
+    tracking_grace_steps: int = 50  # evaluation: ignore the first steps of an episode
+
+
+@dataclass
 class TrainConfig:
     seed: int = 0
     device: str = "cpu"
@@ -198,6 +216,7 @@ class TrainConfig:
     reward: WholeBodyRewardCfg = field(default_factory=WholeBodyRewardCfg)
     guard: GuardConfig = field(default_factory=GuardConfig)
     demonstrations: DemonstrationConfig = field(default_factory=DemonstrationConfig)
+    trajectory: TrajectoryConfig = field(default_factory=TrajectoryConfig)
 
     def validate(self):
         if self.actor_update_limit is not None and (isinstance(self.actor_update_limit,bool) or not isinstance(self.actor_update_limit,int) or self.actor_update_limit<1):
@@ -267,6 +286,19 @@ class TrainConfig:
         if self.sim.reset_bank_batches<0 or self.sim.warp_nconmax<1 or self.sim.warp_njmax<1:
             raise ValueError('invalid reset bank or warp buffer sizes')
         if not isinstance(self.checkpoint_replay,bool):raise ValueError('checkpoint_replay must be boolean')
+        t=self.trajectory
+        if not 0<=t.fraction<=1 or min(t.segment_steps,t.update_steps,t.continuity_candidates)<1 \
+                or not 0<=t.lower_level_fraction<=1 or t.tracking_grace_steps<0:
+            raise ValueError('invalid trajectory schedule')
+        if t.library and t.segment_steps>=self.sim.episode_steps*4:
+            raise ValueError('trajectory.segment_steps is implausibly long for the episode')
+        metrics=('final_held_success_rate','tracking_success_rate')
+        if self.curriculum.metric not in metrics or self.guard.success_metric not in metrics:
+            raise ValueError(f'curriculum.metric and guard.success_metric must be one of {metrics}')
+        if 'tracking' in (self.curriculum.metric+self.guard.success_metric) and not t.library:
+            raise ValueError('tracking_success_rate requires trajectory.library')
+        if not 0<self.guard.rejection_lr_factor<=1:raise ValueError('guard.rejection_lr_factor must be in (0,1]')
+        if not 0<=self.guard.success_tolerance<1:raise ValueError('guard.success_tolerance must be in [0,1)')
         if self.policy.goal_conditioning not in ("encoded", "direct") or self.policy.goal_position_scale <= 0:
             raise ValueError("invalid goal conditioning/position scale")
         if self.policy.action_mode not in ("absolute","delta","target") or self.policy.action_delta_limit<=0:

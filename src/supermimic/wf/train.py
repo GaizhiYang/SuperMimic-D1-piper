@@ -168,7 +168,18 @@ class Trainer:
         self.age = torch.zeros(cfg.sim.num_envs, dtype=torch.long, device=self.device)
         self.goal_hold=torch.zeros_like(self.age)
         self.level = cfg.curriculum.initial_level
-        self.goals = self.sample_goals(self.state()).detach()
+        self.trajectories = self.schedule = None
+        if cfg.trajectory.library:
+            from .goal_trajectory import TrajectoryLibrary, TrajectorySchedule
+            self.trajectories = TrajectoryLibrary(cfg.trajectory.library, self.task, self.manifest["physics_hash"],
+                                                  cfg.sim.dt, self.device)
+            self.schedule = TrajectorySchedule(self.trajectories, cfg.trajectory, cfg.reward.goal_follow_frame,
+                                               cfg.sim.num_envs, self.device)
+        state = self.state()
+        self.goals = self.sample_goals(state).detach()
+        if self.schedule is not None:
+            self.goals = self.schedule.start(torch.arange(cfg.sim.num_envs, device=self.device), state,
+                                             self.goals, self.level, self.task.tcp_pose(state)).detach()
         self.iteration = self.model_updates = self.actor_updates = 0
         self.accepted_actor_updates = self.pending_actor_updates = 0
         self.warm_start_info = None
@@ -182,7 +193,9 @@ class Trainer:
         if cfg.sim.switch_goals_after_hold:self.completed['goal_switches']=0
         self.guard = (PolicyGuard(return_tolerance=cfg.guard.score_tolerance,
             failure_slack=cfg.guard.allowed_failure_increase, min_lr_scale=cfg.guard.min_lr_scale,
-            prefer_success=cfg.guard.prefer_success,prefer_safety=cfg.guard.prefer_safety)
+            prefer_success=cfg.guard.prefer_success,prefer_safety=cfg.guard.prefer_safety,
+            success_key=cfg.guard.success_metric, rejection_lr_factor=cfg.guard.rejection_lr_factor,
+            success_tolerance=cfg.guard.success_tolerance)
             if cfg.guard.enabled else None)
         self.guard_level = self.level
         self.guard_verified_iteration = -1
@@ -365,6 +378,11 @@ class Trainer:
             if change.any():
                 sampled=self.apply_command_curriculum(self.task.sample_goals(sn[change],self.level))
                 self.goals[change,7:11]=sampled[...,7:11]
+                if self.schedule is not None:
+                    self.goals=self.schedule.refresh(change.nonzero().squeeze(-1),sn,self.goals)
+        if self.schedule is not None:
+            # Ta: new trajectory windows; Tb: write the window pose into the command.
+            self.goals=self.schedule.step(sn,self.goals,self.level,self.task.tcp_pose(sn),alive=~ended).detach()
         if self.cfg.sim.switch_goals_after_hold:
             success=terms['success'] & torch.as_tensor(metrics['safe'],device=self.device) & ~ended
             self.goal_hold=torch.where(success,self.goal_hold+1,torch.zeros_like(self.goal_hold))
@@ -380,7 +398,10 @@ class Trainer:
             self.completed["episodes"] += len(ids)
             self.completed["failed"] += int(failed[ids].sum())
             self.reset_envs(ids.cpu().numpy())
-            self.goals[ids] = self.sample_goals(self.state()[ids])
+            state = self.state()
+            self.goals[ids] = self.sample_goals(state[ids])
+            if self.schedule is not None:
+                self.goals = self.schedule.start(ids, state, self.goals, self.level, self.task.tcp_pose(state)).detach()
             self.age[ids] = 0
             self.goal_hold[ids]=0
             self.previous[ids] = torch.as_tensor(self.sim.initial_action[ids.cpu().numpy()],dtype=torch.float32,device=self.device)
@@ -639,9 +660,21 @@ class Trainer:
             hold_steps=self.cfg.curriculum.hold_steps, dt=self.cfg.sim.dt,
             settle_steps=self.cfg.sim.reset_settle_steps,
             goal_seed_device=self.cfg.curriculum.goal_seed_device,
-            arm_initial_position=self.cfg.sim.arm_initial_position,**fixture)
+            arm_initial_position=self.cfg.sim.arm_initial_position,**fixture,**self.trajectory_fixture(task))
         if fixture:result['goal_sampling']='fixed new-pose offsets around training anchors; original held-out anchors evaluated separately'
         return result
+
+    def trajectory_fixture(self, task):
+        if self.trajectories is None:
+            return {}
+        library = self.trajectories
+        if library.device != task.device:
+            if getattr(self, "_cpu_trajectories", None) is None:
+                from .goal_trajectory import TrajectoryLibrary
+                self._cpu_trajectories = TrajectoryLibrary(self.cfg.trajectory.library, task,
+                    self.manifest["physics_hash"], self.cfg.sim.dt, task.device)
+            library = self._cpu_trajectories
+        return dict(trajectories=library, trajectory_cfg=self.cfg.trajectory)
 
     def evaluation_modules(self):
         if self.cfg.curriculum.evaluation_device=='cpu' and self.device.type!='cpu':
@@ -695,7 +728,7 @@ class Trainer:
         evaluated_level = self.level
         evaluation = self.evaluate(episodes=c.eval_episodes, seed=self.cfg.seed + 10000)
         (self.output / f"validation_{self.iteration:07d}.json").write_text(json.dumps(evaluation, indent=2, allow_nan=False)+"\n")
-        passed = evaluation["final_held_success_rate"] >= c.promote_success_rate
+        passed = evaluation[c.metric] >= c.promote_success_rate
         self.curriculum_checks = self.curriculum_checks + 1 if passed else 0
         if self.curriculum_checks >= c.promote_checks and self.level < c.max_level:
             self.level += 1
@@ -704,6 +737,8 @@ class Trainer:
             if self.guard is not None:
                 self.latest.update(self.check_guard(rebase=True))
         return {"eval_final_held_success_rate": evaluation["final_held_success_rate"],
+                "eval_tracking_success_rate": evaluation.get("tracking_success_rate"),
+                "eval_tracking_rms_position_error_m": evaluation.get("tracking_rms_position_error_m"),
                 "eval_failure_rate": evaluation["failure_rate"], "curriculum_level": self.level,
                 "eval_iteration": self.iteration, "eval_level": evaluated_level}
 
@@ -781,6 +816,8 @@ class Trainer:
             "simulation": self.sim.snapshot(), "previous": self.previous, "goals": self.goals,
             "age": self.age, "level": self.level, "curriculum_checks": self.curriculum_checks,
             "goal_hold":self.goal_hold,
+            "trajectory_schedule": self.schedule.state_dict() if self.schedule is not None else None,
+            "trajectory_fingerprint": self.trajectories.fingerprint if self.trajectories is not None else None,
             "validation_error": self.validation_error, "completed": self.completed,
             "guard": self.guard.state_dict() if self.guard is not None else None,
             "guard_level": self.guard_level, "guard_verified_iteration": self.guard_verified_iteration,
@@ -876,7 +913,7 @@ class Trainer:
         expected = asdict(self.cfg)
         previous = asdict(config_from_dict(ck["config"]))
         # Paths, device and total budget can change; learning/task semantics cannot.
-        for name in ("sim", "model", "policy", "curriculum", "reward", "guard", "demonstrations", "replay_steps", "seed", "warmup_steps", "update_every"):
+        for name in ("sim", "model", "policy", "curriculum", "reward", "guard", "demonstrations", "trajectory", "replay_steps", "seed", "warmup_steps", "update_every"):
             if json.dumps(expected[name], sort_keys=True) != json.dumps(previous.get(name), sort_keys=True):
                 raise ValueError(f"resume configuration mismatch in {name}")
         source_reward = asdict(WholeBodyRewardCfg(**ck["reward_config"]))
@@ -910,6 +947,10 @@ class Trainer:
         self.accepted_actor_updates = ck.get("accepted_actor_updates", 0)
         self.pending_actor_updates = ck.get("pending_actor_updates", 0)
         self.goal_hold=ck.get('goal_hold',torch.zeros_like(self.age)).to(self.device)
+        if self.schedule is not None:
+            if ck.get('trajectory_fingerprint')!=self.trajectories.fingerprint or ck.get('trajectory_schedule') is None:
+                raise ValueError('trajectory library changed since checkpoint')
+            self.schedule.load_state_dict(ck['trajectory_schedule'])
         self.warm_start_info = ck.get("warm_start_info")
         expected_fingerprint=self.demonstrations.fingerprint if self.demonstrations is not None else None
         if ck.get("reference_fingerprint")!=expected_fingerprint:
