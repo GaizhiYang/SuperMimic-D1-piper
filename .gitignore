@@ -46,7 +46,6 @@
 **/runs/
 **/exports/
 **/supervision/
-**/outputs/
 *.npz
 *.npy
 *.pt

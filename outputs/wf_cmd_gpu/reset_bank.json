@@ -1,0 +1,10 @@
+{
+  "states": 16384,
+  "attempted": 16384,
+  "settle_steps": 100,
+  "joint_noise": 0.015,
+  "friction_range": [
+    0.6,
+    1.2
+  ]
+}
