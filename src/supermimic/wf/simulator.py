@@ -78,6 +78,16 @@ class BatchedSimulator:
         # accidentally hiding the requested per-environment coefficient.
         self.model.geom_friction[:, 0] = self.xi[i, 0]
 
+    backend = "mujoco"
+
+    def set_friction(self, ids: Any, values: np.ndarray) -> None:
+        """Assign per-environment sliding friction (applied before each step)."""
+        ids = self._ids(ids)
+        values = np.asarray(values, dtype=np.float64).reshape(len(ids))
+        if not np.isfinite(values).all() or (values <= 0).any():
+            raise ValueError("friction must be finite and positive")
+        self.xi[ids, 0] = values
+
     def reset(self, ids: Any = None, state: np.ndarray | None = None) -> np.ndarray:
         ids = self._ids(ids)
         self.xi[ids, 0] = self.rng.uniform(*self.friction_range, size=len(ids))

@@ -1,0 +1,18 @@
+{
+  "model_dimensions": [
+    29,
+    28,
+    22
+  ],
+  "state_dim": 57,
+  "mass_kg": 54.976760000000006,
+  "wheel_radius_m": 0.087,
+  "physics_hash": "e1ced04c5421b4cd850b4acf9a5f8dde3990f94edf55c336ce7391057eb0fb5a",
+  "motor_gains_limits_and_nominal_pose_validated": true,
+  "default_full_body_hold_passed": true,
+  "default_full_body_hold_duration_s": 10.0,
+  "noisy_collection_passed": true,
+  "detail_file": "leg_gain_update_validation.json",
+  "previous_validation_and_asset_backup": "private_assets/d1_piper_before_leg_gain_update_20261112",
+  "status": "Requested leg gains applied; nominal and finite noisy-collection checks passed. No trained-policy performance claim."
+}

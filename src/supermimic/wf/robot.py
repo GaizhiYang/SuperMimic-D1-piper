@@ -161,9 +161,17 @@ def build_model(asset_dir: str | Path | None = None, timestep: float = 0.005, *,
         parent, child = joint.find("parent").get("link"), joint.find("child").get("link")
         if parent != "world":
             mj.add_exclude(bodyname1=parent, bodyname2=child)
-    for name in joint_names:
+    actuator = config.get("actuator_parameters")
+    arm_effort_cap = (float(actuator["arm_effort_limit_nm"])
+                      if actuator and actuator.get("arm_effort_limit_nm") is not None else None)
+    if arm_effort_cap is not None and (not np.isfinite(arm_effort_cap) or arm_effort_cap <= 0):
+        raise ValueError("arm_effort_limit_nm must be finite and positive")
+    for k, name in enumerate(joint_names):
         limit = joints[name].find("limit")
         effort = float(limit.get("effort"))
+        if arm_effort_cap is not None and k >= 16:
+            # Asset-declared motor torque cap; never raises the URDF limit.
+            effort = min(effort, arm_effort_cap)
         mj.add_actuator(name=f"motor_{name}", target=name,
                         trntype=mujoco.mjtTrn.mjTRN_JOINT,
                         gear=[1, 0, 0, 0, 0, 0],
@@ -182,6 +190,8 @@ def build_model(asset_dir: str | Path | None = None, timestep: float = 0.005, *,
         high.append(np.inf if continuous else float(limit.get("upper")))
         effort.append(float(limit.get("effort")))
         velocity.append(float(limit.get("velocity")))
+    if arm_effort_cap is not None:
+        effort[16:] = [min(e, arm_effort_cap) for e in effort[16:]]
     wheel_ids = np.arange(12, 16)
     wheel_bodies = np.array([getid(mujoco.mjtObj.mjOBJ_BODY, n.removesuffix("_joint"))
                              for n in joint_names[12:16]])
@@ -195,6 +205,20 @@ def build_model(asset_dir: str | Path | None = None, timestep: float = 0.005, *,
     model.dof_damping[dadr] = np.r_[np.full(12, 0.2), np.full(4, 0.03), np.full(6, 0.1)]
     kp = np.r_[np.tile([200., 250., 300.], 4), np.zeros(4), [50., 70., 60., 30., 20., 15.]]
     kd = np.r_[np.tile([8., 8., 10.], 4), np.full(4, 2.), [2., 2., 1.5, 1., .8, .5]]
+    if actuator:
+        # Asset-supplied simulation PD gains (robot.json "actuator_parameters")
+        # replace the legacy defaults above. Leg gains are hip/thigh/calf and
+        # repeat for the four legs; wheels are velocity-damping servos.
+        try:
+            kp = np.r_[np.tile(np.asarray(actuator["leg_kp"], float), 4), np.zeros(4),
+                       np.asarray(actuator["arm_kp"], float)]
+            kd = np.r_[np.tile(np.asarray(actuator["leg_kd"], float), 4),
+                       np.full(4, float(actuator["wheel_kd"])), np.asarray(actuator["arm_kd"], float)]
+        except KeyError as error:
+            raise ValueError(f"actuator_parameters is missing {error}") from None
+        if kp.shape != (22,) or kd.shape != (22,) or not np.isfinite(kp).all() or not np.isfinite(kd).all() \
+                or (kp < 0).any() or (kd < 0).any():
+            raise ValueError("actuator_parameters must give 3 leg, 1 wheel and 6 arm nonnegative gains")
     arm_scale = (np.maximum(q0[16:22] - np.asarray(low)[16:22],
                             np.asarray(high)[16:22] - q0[16:22])
                  if arm_action_scale is None else np.full(6, arm_action_scale))
@@ -230,7 +254,9 @@ def build_model(asset_dir: str | Path | None = None, timestep: float = 0.005, *,
         tcp_body=int(model.site_bodyid[tcp_site]), tcp_site=tcp_site,
         tcp_local_pos=model.site_pos[tcp_site].copy(),
         tcp_local_quat=model.site_quat[tcp_site].copy(),
-        wheel_body_ids=wheel_bodies, wheel_geom_ids=wheel_geoms, wheel_radius=.093,
+        wheel_body_ids=wheel_bodies, wheel_geom_ids=wheel_geoms,
+        # Rolling radius of the source collision cylinders (all four are equal).
+        wheel_radius=float(np.mean(model.geom_size[wheel_geoms, 0])),
         ground_geom=getid(mujoco.mjtObj.mjOBJ_GEOM, "wf_ground"),
         base_weld_eq=weld_id,
         default_height=height, asset_dir=root)

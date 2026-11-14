@@ -1,0 +1,97 @@
+{
+  "date": "2026-11-12",
+  "physics_hash": "e1ced04c5421b4cd850b4acf9a5f8dde3990f94edf55c336ce7391057eb0fb5a",
+  "kp": [
+    120.0,
+    150.0,
+    180.0,
+    120.0,
+    150.0,
+    180.0,
+    120.0,
+    150.0,
+    180.0,
+    120.0,
+    150.0,
+    180.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    80.0,
+    80.0,
+    80.0,
+    40.0,
+    25.0,
+    25.0
+  ],
+  "kd": [
+    5.0,
+    5.0,
+    6.0,
+    5.0,
+    5.0,
+    6.0,
+    5.0,
+    5.0,
+    6.0,
+    5.0,
+    5.0,
+    6.0,
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    5.0,
+    5.0,
+    5.0,
+    5.0,
+    1.5,
+    1.5
+  ],
+  "arm_effort_limit_nm": [
+    30.0,
+    30.0,
+    30.0,
+    30.0,
+    30.0,
+    30.0
+  ],
+  "default_arm_q_rad": [
+    0.0,
+    1.0,
+    -1.5,
+    0.0,
+    0.5,
+    0.0
+  ],
+  "previous_asset_backup": "private_assets/d1_piper_before_leg_gain_update_20261112",
+  "old_checkpoint_matches_backup": true,
+  "scope": "Loaded active asset parameters; nominal hold and finite noisy collection checks, not a learned-policy or convergence result.",
+  "nominal_hold": {
+    "duration_s": 10.0,
+    "first_physical_failure_time_s": null,
+    "safe_fraction": 1.0,
+    "final_base_height_m": 0.4170860451043412,
+    "final_tilt_rad": 0.07904786060699394,
+    "final_wheel_contact": [
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "noisy_collection": {
+    "environments": 8,
+    "duration_per_env_s": 5.0,
+    "friction_range": [
+      0.6,
+      1.2
+    ],
+    "normalized_action_noise_std": 0.12,
+    "reset_settle_steps": 100,
+    "failed_transitions": 0,
+    "has_8_step_training_windows": true,
+    "has_8_step_validation_windows": true
+  }
+}

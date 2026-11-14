@@ -24,6 +24,15 @@ class SimConfig:
     reset_settle_steps: int = 0  # Legacy checkpoints sampled before settling.
     switch_goals_after_hold: int = 0  # Positive: change the goal in place after this many safe held steps.
     arm_initial_position: tuple[float,...] | None = None  # None: legacy working pose; six zeros: URDF folded zero.
+    # Collection backend: "mujoco" (serial CPU, reference) or "warp" (MuJoCo Warp, batched GPU).
+    backend: str = "mujoco"
+    warp_device: str | None = None  # None: the training device if it is CUDA, otherwise "cpu".
+    warp_nconmax: int = 64  # Contacts allocated per world.
+    warp_njmax: int = 320  # Constraint rows per world.
+    warp_cuda_graph: bool = True
+    # >0: pre-settle this many full batches of noisy resets once, then reset
+    # finished episodes by copying a stored settled state (no per-reset settling).
+    reset_bank_batches: int = 0
 
 
 @dataclass
@@ -169,6 +178,7 @@ class TrainConfig:
     log_interval: int = 50
     checkpoint_interval: int = 2000
     keep_actor_checkpoints: bool = False  # Small, immutable snapshots for offline periodic evaluation.
+    checkpoint_replay: bool = True  # False: omit online replay from ckpt_latest.pt (large with many envs).
     cpu_threads: int = 4
     compile_fk: bool = False  # Optional numeric kernel optimization; no task/model change.
     compile_clearance: bool = False  # Same sampled geometry and VJP, fewer GPU launches.
@@ -252,6 +262,11 @@ class TrainConfig:
             raise ValueError('arm_initial_position must contain six finite joint angles')
         if self.sim.switch_goals_after_hold<0:
             raise ValueError('goal switch hold must be nonnegative')
+        if self.sim.backend not in ('mujoco','warp'):
+            raise ValueError("sim.backend must be 'mujoco' or 'warp'")
+        if self.sim.reset_bank_batches<0 or self.sim.warp_nconmax<1 or self.sim.warp_njmax<1:
+            raise ValueError('invalid reset bank or warp buffer sizes')
+        if not isinstance(self.checkpoint_replay,bool):raise ValueError('checkpoint_replay must be boolean')
         if self.policy.goal_conditioning not in ("encoded", "direct") or self.policy.goal_position_scale <= 0:
             raise ValueError("invalid goal conditioning/position scale")
         if self.policy.action_mode not in ("absolute","delta","target") or self.policy.action_delta_limit<=0:

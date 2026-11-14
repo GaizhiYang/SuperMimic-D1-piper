@@ -1,0 +1,16 @@
+{
+  "tcp": {
+    "parent_link": "piper_end_effector",
+    "xyz_m": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "rpy_rad": [
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "provenance": "Source URDF end_effector frame, also used with identity body_offset in LeggedManip_Lab IK; model definition, not hardware measurement."
+}

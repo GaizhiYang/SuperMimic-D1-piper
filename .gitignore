@@ -11,27 +11,27 @@
 .release/
 
 # Private robot resources and derived model data
-/wf-arm-tbot/
-**/assets/
-**/private_assets/
-**/meshes/
-**/cad/
-**/calibration/
-**/provenance/
-*.urdf
-*.xacro
-*.xml
-*.stl
-*.STL
-*.obj
-*.dae
-*.glb
-*.gltf
-*.blend
-*.step
-*.stp
-*.ply
-*.mjb
+# /wf-arm-tbot/
+# **/assets/
+# **/private_assets/
+# **/meshes/
+# **/cad/
+# **/calibration/
+# **/provenance/
+# *.urdf
+# *.xacro
+# *.xml
+# *.stl
+# *.STL
+# *.obj
+# *.dae
+# *.glb
+# *.gltf
+# *.blend
+# *.step
+# *.stp
+# *.ply
+# *.mjb
 
 # Training outputs, data, diagnostics and media
 /data/

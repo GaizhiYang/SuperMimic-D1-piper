@@ -69,6 +69,21 @@ def model_manifest(spec):
         "collector": "serial native MuJoCo CPU, learning can use CPU or CUDA"}
 
 
+def make_collector(cfg: TrainConfig, device: torch.device):
+    """Training-data simulator: serial CPU MuJoCo or batched MuJoCo Warp."""
+    c = cfg.sim
+    kwargs = dict(num_envs=c.num_envs, seed=cfg.seed, dt=c.dt, timestep=c.timestep,
+        asset_dir=cfg.asset_dir, friction_range=(c.friction_min, c.friction_max),
+        leg_action_scale=c.leg_action_scale, arm_action_scale=c.arm_action_scale,
+        wheel_action_scale=c.wheel_action_scale, arm_initial_position=c.arm_initial_position)
+    if c.backend == "mujoco":
+        return BatchedSimulator(**kwargs)
+    from .simulator_warp import WarpBatchedSimulator
+    warp_device = c.warp_device or (f"cuda:{device.index or 0}" if device.type == "cuda" else "cpu")
+    return WarpBatchedSimulator(**kwargs, device=warp_device, nconmax=c.warp_nconmax,
+                                njmax=c.warp_njmax, cuda_graph=c.warp_cuda_graph)
+
+
 class Trainer:
     def __init__(self, cfg: TrainConfig):
         cfg.validate()
@@ -83,14 +98,17 @@ class Trainer:
         if cfg.warm_start and Path(cfg.warm_start).resolve().parent == self.output.resolve():
             raise ValueError("warm-start output must differ from the source checkpoint directory")
         self.output.mkdir(parents=True, exist_ok=True)
-        self.sim = BatchedSimulator(num_envs=cfg.sim.num_envs, seed=cfg.seed, dt=cfg.sim.dt,
-            timestep=cfg.sim.timestep, asset_dir=cfg.asset_dir,
-            friction_range=(cfg.sim.friction_min, cfg.sim.friction_max),
-            leg_action_scale=cfg.sim.leg_action_scale, arm_action_scale=cfg.sim.arm_action_scale,
-            wheel_action_scale=cfg.sim.wheel_action_scale,arm_initial_position=cfg.sim.arm_initial_position)
+        self.sim = make_collector(cfg, self.device)
         self.task = WholeBodyTask(self.sim.model, self.sim.spec, self.device, cfg.reward)
-        self.sim.settle(steps=cfg.sim.reset_settle_steps)
+        self.reset_bank = None
+        if cfg.sim.reset_bank_batches:
+            self.build_reset_bank()
+            self.reset_from_bank(np.arange(cfg.sim.num_envs))
+        else:
+            self.sim.settle(steps=cfg.sim.reset_settle_steps)
         self.manifest = model_manifest(self.sim.spec)
+        self.manifest["collector"] = (f"MuJoCo Warp batched ({self.sim.wp_device}), same MjModel; "
+            "CPU MuJoCo evaluation" if cfg.sim.backend == "warp" else self.manifest["collector"])
         self.excitation=None
         if cfg.model.excitation_file:
             from .excitation import DynamicsExcitation
@@ -189,6 +207,65 @@ class Trainer:
 
     def state(self):
         return torch.as_tensor(self.sim.read_state(), dtype=torch.float32, device=self.device)
+
+    def build_reset_bank(self):
+        """Settle several full batches of noisy resets once, using real physics.
+
+        Every stored state is produced exactly like a per-episode reset
+        (reset -> joint noise -> actuator settling with the reset command) and
+        kept only if it is finite, safe and not a physical failure. Finished
+        episodes later restart from a uniformly drawn stored state and its
+        friction, which removes per-reset settling from batched collection.
+        """
+        c = self.cfg.sim
+        nonwheel = np.r_[0:12, 16:22]
+        states, frictions = [], []
+        for _ in range(c.reset_bank_batches):
+            self.sim.reset()
+            if c.reset_joint_noise:
+                state = self.sim.read_state()
+                noise = self.rng.normal(0, c.reset_joint_noise, (len(state), 18))
+                state[:, 7 + nonwheel] = np.clip(state[:, 7 + nonwheel] + noise,
+                    self.sim.spec.low[nonwheel], self.sim.spec.high[nonwheel])
+                self.sim.write_state(state)
+            self.sim.settle(steps=c.reset_settle_steps)
+            state = self.sim.read_state()
+            metrics = self.sim.metrics()
+            failed = physical_failure(self.task, torch.as_tensor(state, dtype=torch.float32, device=self.device),
+                                      metrics).cpu().numpy()
+            keep = metrics["safe"] & ~failed & np.isfinite(state).all(1)
+            states.append(state[keep])
+            frictions.append(self.sim.xi[keep, 0].copy())
+        states, frictions = np.concatenate(states), np.concatenate(frictions)
+        if len(states) < max(2, c.num_envs // 4):
+            raise RuntimeError(f"only {len(states)} safe settled reset states; inspect the robot model and reset pose")
+        self.reset_bank = dict(states=states, friction=frictions)
+        (self.output / "reset_bank.json").write_text(json.dumps(dict(
+            states=len(states), attempted=c.reset_bank_batches * c.num_envs,
+            settle_steps=c.reset_settle_steps, joint_noise=c.reset_joint_noise,
+            friction_range=[c.friction_min, c.friction_max]), indent=2) + "\n")
+
+    def reset_from_bank(self, ids):
+        ids = np.asarray(ids, dtype=int).reshape(-1)
+        rows = self.rng.integers(len(self.reset_bank["states"]), size=len(ids))
+        self.sim.reset(ids)
+        self.sim.set_friction(ids, self.reset_bank["friction"][rows])
+        self.sim.write_state(self.reset_bank["states"][rows], ids=ids)
+
+    def reset_envs(self, ids):
+        """Start new episodes for finished environments (numpy indices)."""
+        if self.reset_bank is not None:
+            self.reset_from_bank(ids)
+            return
+        self.sim.reset(ids)
+        if self.cfg.sim.reset_joint_noise:
+            reset_state = self.sim.read_state()[ids].copy()
+            nonwheel = np.r_[0:12, 16:22]
+            noise = self.rng.normal(0, self.cfg.sim.reset_joint_noise, (len(ids), 18))
+            reset_state[:, 7 + nonwheel] = np.clip(reset_state[:, 7 + nonwheel] + noise,
+                self.sim.spec.low[nonwheel], self.sim.spec.high[nonwheel])
+            self.sim.write_state(reset_state, ids=ids)
+        self.sim.settle(ids, steps=self.cfg.sim.reset_settle_steps)
 
     def sample_goals(self,state):
         goals=self.task.sample_goals(state,level=self.level)
@@ -302,15 +379,7 @@ class Trainer:
             ids = ended.nonzero().squeeze(-1)
             self.completed["episodes"] += len(ids)
             self.completed["failed"] += int(failed[ids].sum())
-            self.sim.reset(ids.cpu().numpy())
-            if self.cfg.sim.reset_joint_noise:
-                reset_state = self.sim.read_state()[ids.cpu().numpy()].copy()
-                nonwheel = np.r_[0:12, 16:22]
-                noise = self.rng.normal(0, self.cfg.sim.reset_joint_noise, (len(ids), 18))
-                reset_state[:, 7 + nonwheel] = np.clip(reset_state[:, 7 + nonwheel] + noise,
-                    self.sim.spec.low[nonwheel], self.sim.spec.high[nonwheel])
-                self.sim.write_state(reset_state, ids=ids.cpu().numpy())
-            self.sim.settle(ids.cpu().numpy(), steps=self.cfg.sim.reset_settle_steps)
+            self.reset_envs(ids.cpu().numpy())
             self.goals[ids] = self.sample_goals(self.state()[ids])
             self.age[ids] = 0
             self.goal_hold[ids]=0
@@ -689,8 +758,9 @@ class Trainer:
         return outcome
 
     def save(self, name="ckpt_latest.pt"):
-        replay = {key: value.cpu() if isinstance(value, torch.Tensor) else value
-                  for key, value in vars(self.buffer).items() if key != "device"}
+        replay = ({key: value.cpu() if isinstance(value, torch.Tensor) else value
+                   for key, value in vars(self.buffer).items() if key != "device"}
+                  if self.cfg.checkpoint_replay else None)
         checkpoint = {"format": "wf_goal_bptt_v1", "config": asdict(self.cfg),
             "runtime_optimization":self.runtime_optimization,
             "clearance_optimization":self.clearance_optimization,
@@ -772,7 +842,8 @@ class Trainer:
                 load_increment_feedback_upgrade(self.actor,actor_ck['actor'])
             else:
                 self.actor.load_state_dict(actor_ck["actor"])
-        copied = ck["replay"]["E"] == self.buffer.E and ck["replay"]["T"] == self.buffer.T
+        copied = (ck["replay"] is not None and ck["replay"]["E"] == self.buffer.E
+                  and ck["replay"]["T"] == self.buffer.T)
         if copied:
             for name, value in ck["replay"].items():
                 if name=='goal' and value.shape[-1]!=self.buffer.goal.shape[-1]:
@@ -817,12 +888,19 @@ class Trainer:
         self.wm_opt.load_state_dict(ck["wm_opt"])
         self.actor_opt.load_state_dict(ck["actor_opt"])
         self.critic_opt.load_state_dict(ck["critic_opt"])
-        for name, value in ck["replay"].items():
-            setattr(self.buffer, name, value.to(self.device) if isinstance(value, torch.Tensor) else value)
+        if ck["replay"] is not None:
+            for name, value in ck["replay"].items():
+                setattr(self.buffer, name, value.to(self.device) if isinstance(value, torch.Tensor) else value)
+        # Without stored replay the buffer refills from the restored worlds; the
+        # held-out model error is re-measured before the next Actor update.
         self.sim.restore(ck["simulation"])
         for name in ("previous", "goals", "age", "iteration", "model_updates", "actor_updates", "level",
                      "curriculum_checks", "validation_error", "completed"):
             setattr(self, name, ck[name])
+        for name in ("previous", "goals", "age"):
+            setattr(self, name, getattr(self, name).to(self.device))
+        if ck["replay"] is None:
+            self.validation_error = float("inf")
         if self.guard is not None:
             if ck.get("guard") is None:
                 raise ValueError("resume requires a physical policy guard snapshot")

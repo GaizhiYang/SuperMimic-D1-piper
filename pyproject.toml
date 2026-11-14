@@ -11,6 +11,9 @@ dependencies = ["torch>=2.5,<3", "numpy>=1.26,<3", "mujoco>=3.10,<4", "scipy>=1.
 dev = ["pytest>=8,<10"]
 media = ["imageio>=2.30,<3", "imageio-ffmpeg>=0.5,<1", "matplotlib>=3.8,<4"]
 teacher = ["osqp>=0.6.7,<0.7", "quadprog>=0.1.13,<0.2"]
+# Batched MuJoCo Warp collection for WF training (sim.backend = "warp").
+# Tested locally with mujoco 3.16.0, mujoco-warp 3.16.0, warp-lang 1.19.0.
+gpu = ["mujoco~=3.16.0", "mujoco-warp~=3.16.0", "warp-lang>=1.15"]
 # The inherited G1 implementation has a separate GPU dependency stack.
 g1 = [
   "mjlab @ git+https://github.com/mujocolab/mjlab@8bb2bc9e187797689ec82c78c35019afd2fd0376",
@@ -27,6 +30,8 @@ sm-train = "supermimic.scripts.train:main"
 sm-wf-train = "supermimic.wf.train:main"
 sm-wf-eval = "supermimic.wf.evaluate:main"
 sm-mimicagent = "supermimic.mimicagent.pipeline:main"
+sm-wf-command-refs = "supermimic.wf.command_reference:main"
+sm-wf-warp-check = "supermimic.wf.simulator_warp:main"
 
 [build-system]
 requires = ["hatchling>=1.26"]

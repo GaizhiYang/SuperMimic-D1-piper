@@ -1,0 +1,8 @@
+{
+  "arm_joint5_lower_rad": -1.5620696,
+  "arm_joint5_upper_rad": 1.5620696,
+  "source": "d1_piper_l.urdf: joint5/limit (copied without narrowing)",
+  "source_urdf_sha256": "1c8cefa980eb0ef70e2263cfee04493f16b52c386e8accc4e8f1b4fd63f19e99",
+  "hardware_validated": false,
+  "scope": "Simulation model bounds; replace with validated operating limits for the actual robot if different."
+}
