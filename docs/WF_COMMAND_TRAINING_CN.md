@@ -11,8 +11,30 @@
 
 ```bash
 bash scripts/wf_cmd_pipeline.sh          # 阶段 0..4 全部
-bash scripts/wf_cmd_pipeline.sh 2 2      # 只跑训练（自动续训）
+bash scripts/wf_cmd_pipeline.sh 1 4      # 重新生成参考并开始一次新训练
 ```
+
+包含阶段 1 时，每次运行自动创建一对带相同时间后缀的新目录，例如：
+
+```text
+outputs/wf_cmd_gpu_20261114_203000_123456/
+outputs/wf_cmd_refs_20261114_203000_123456/library/
+```
+
+时间戳使用上海时区，精确到微秒；目录重名时自动增加编号。
+训练目录中保存本次专用的 `pipeline_config.json`，其中 `output` 和
+`demonstrations.directory` 已同步到新路径。原始配置保持不变，所有后续阶段都使用这份专用配置。
+`REFS` 环境变量可指定参考目录前缀，配置中的 `output` 指定训练目录前缀。
+
+继续某次运行时，从终端输出中找到其 `Pipeline config`，指定这份配置并从阶段 2 开始：
+
+```bash
+CONFIG=outputs/wf_cmd_gpu_20261114_203000_123456/pipeline_config.json \
+  bash scripts/wf_cmd_pipeline.sh 2 4
+```
+
+阶段 2～4 会使用指定配置中的已有目录；存在 `ckpt_latest.pt` 时自动续训。
+仅执行阶段 0 也不会分配新目录。手动运行下文的单模块示例时，仍可自行指定固定目录。
 
 ---
 
@@ -143,6 +165,38 @@ python -m supermimic.wf.export   --checkpoint ... --output outputs/wf_cmd_gpu/po
 ```
 
 导出格式为 `wf_command_unified_torchscript_v2`，输入 `world_goal` 为 `[N,11]`，元数据写在 `policy.pt.json`。
+
+### 录制策略视频
+
+`supermimic.wf.play` 复用 `evaluate_policy` 的物理评估过程，在每个物理控制步之后
+观察场景并渲染，不启动训练或世界模型。默认无窗口，CPU 运行策略与 MuJoCo，EGL 渲染。
+
+```bash
+# 在运行 WF 训练的 Python 环境中安装录像依赖：
+python -m pip install 'imageio>=2.30,<3' 'imageio-ffmpeg>=0.5,<1'
+
+# 目录自动选择 ckpt_latest.pt；也可以直接指定 actor_0003000.pt 等文件：
+python -m supermimic.wf.play --checkpoint outputs/wf_cmd_gpu --episodes 3 --level 0
+
+# 固定底座前进 0.1 m/s，同时追踪随机采样的末端目标：
+python -m supermimic.wf.play --checkpoint outputs/wf_cmd_gpu \
+  --episodes 1 --command 0.1 0 0 --video outputs/wf_cmd_gpu/videos/forward.mp4
+```
+
+默认输出为 `CHECKPOINT_DIR/videos/preview_iterXXXXXXX_levelN.mp4`，旁边保存同名 JSON，
+包含 checkpoint 迭代数、每个回合的目标、失败判定、保持成功和最终误差。
+每个回合默认录制训练配置中的 600 个控制步（12 秒），结束后停留 1 秒；失败时提前结束，
+保留真实失败画面。30 FPS 按物理时间采样，录像速度不依赖机器的渲染速度。
+
+绿色球为目标位置，橙色球为实际 TCP，RGB 箭头表示目标姿态。画面文字显示指令、
+末端误差、成功/失败以及仿真时间；世界坐标网格方便观察底座运动。
+默认跟随相机距离为 2.8 米，可以用 `--camera-distance` 调整。
+常用参数还有 `--steps 600`、`--seed 20000`、`--fps 30`、`--width 1280 --height 720`。
+不指定 `--level` 时使用完整 checkpoint 保存的课程等级，Actor 快照则默认等级 0。
+`--command VX VY WZ` 的单位为 m/s、m/s、rad/s，需使用支持底座指令的 checkpoint。
+
+脚本默认设置 `MUJOCO_GL=egl`。若机器使用其他已配置的渲染后端，可在启动进程前设置
+`MUJOCO_GL=osmesa` 或 `MUJOCO_GL=glfw`；策略推理的 `--device` 与渲染后端相互独立，物理始终在 CPU 上运行。
 
 ---
 

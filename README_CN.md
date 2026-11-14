@@ -215,6 +215,17 @@ python -m supermimic.wf.train --config configs/examples/wf_train.json
 
 示例只是实验起点，未附带已经训练好的策略。完整接续使用 `--resume`；`--warm-start` 转移的状态范围不同，不能混为同一种恢复方式。
 
+录制已保存策略的视频（无窗口，默认 CPU 推理与物理、EGL 渲染）：
+
+```bash
+python -m pip install 'imageio>=2.30,<3' 'imageio-ffmpeg>=0.5,<1'
+python -m supermimic.wf.play --checkpoint outputs/wf_cmd_gpu --episodes 3 --level 0
+```
+
+视频及评估 JSON 默认保存在训练目录的 `videos/` 下。可传单个 checkpoint 文件，
+使用 `--video path.mp4` 指定输出，或添加 `--command 0.1 0 0` 查看底座前进时的末端追踪。
+更多选项见[录像说明](docs/WF_COMMAND_TRAINING_CN.md#录制策略视频)。
+
 ### 4. 检查固定底盘六轴机械臂
 
 在仓库根目录运行：

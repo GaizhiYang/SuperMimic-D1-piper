@@ -30,7 +30,13 @@ def physical_failure(task, state, metrics):
 def evaluate_policy(actor, task, model, spec, *, episodes=16, level=0, seed=10000,
                     steps=600, hold_steps=15, dt=0.02, friction=1.0, ablation="none", goals=None,
                     settle_steps=0, goal_seed_device="policy",initial_states=None,initial_actions=None,
-                    arm_initial_position=None):
+                    arm_initial_position=None, frame_callback=None):
+    """Evaluate real physics; an optional callback observes each post-step scene.
+
+    ``frame_callback(sim, goals, step, metrics)`` runs before failed worlds reset,
+    so recordings include the actual terminal state. Callbacks must not mutate
+    the simulator or goal tensors.
+    """
     if episodes < 1 or steps < 1 or hold_steps < 1 or hold_steps > steps:
         raise ValueError("require episodes > 0 and 1 <= hold_steps <= steps")
     if not 0 <= level <= 3:
@@ -181,6 +187,10 @@ def evaluate_policy(actor, task, model, spec, *, episodes=16, level=0, seed=1000
         failed |= now_failed
         alive &= ~now_failed
         previous = executed.clone()
+        if frame_callback is not None:
+            frame_callback(sim, goals, step + 1, dict(position_error_m=pe,
+                orientation_error_rad=re, success=success,
+                held_success=(hold >= hold_steps) & ~failed, failed=failed))
         if now_failed.any():
             # Preserve the terminal metrics above, then keep inactive worlds
             # numerically healthy. Their subsequent steps never enter scores.
