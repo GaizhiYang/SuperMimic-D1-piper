@@ -55,7 +55,8 @@
 *.onnx
 *.safetensors
 *.bin
-#*.jsonl
+*.jsonl
+*.json
 #*.log
 #*.mp4
 *.mov

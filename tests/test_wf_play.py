@@ -35,6 +35,9 @@ def test_terminal_frame_is_recorded_between_scheduled_frames():
     recorder.font = ImageFont.load_default()
     recorder.renderer = SimpleNamespace(update_scene=lambda *args, **kwargs: None,
         render=lambda: np.zeros((240, 320, 3), dtype=np.uint8))
+    recorder.visuals = SimpleNamespace(sync=lambda data: data, option=None)
+    recorder.goal_source = "trajectory_library"
+    recorder.presentation, recorder.hud, recorder.camera_mode = False, "full", "follow"
     recorder._markers = lambda *args: None
     recorder.writer = SimpleNamespace(append_data=lambda picture: written.append(picture.copy()))
     recorder.spec = SimpleNamespace(base_body=0)

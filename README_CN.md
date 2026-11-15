@@ -224,7 +224,25 @@ python -m supermimic.wf.play --checkpoint outputs/wf_cmd_gpu --episodes 3 --leve
 
 视频及评估 JSON 默认保存在训练目录的 `videos/` 下。可传单个 checkpoint 文件，
 使用 `--video path.mp4` 指定输出，或添加 `--command 0.1 0 0` 查看底座前进时的末端追踪。
+录像显示 URDF 外形网格和白灰棋盘格地板，末端位姿指令默认从轨迹库采样并随时间更新。
+优先读取 checkpoint 保存的库路径；旧 checkpoint 自动查找 `outputs/` 中物理配置兼容的库，
+也可用 `--trajectory-library 路径/trajectories` 明确指定。
+需要更大活动范围时，可用 `supermimic.wf.preview_trajectory` 另建连续扫动路线，
+录像添加 `--full-trajectory` 即可从头播放整条轨迹。
+汇报展示可添加 `--presentation`，使用 1080p/50 FPS、摄影棚灯光、地面投影与简洁字幕；
+`--hud none` 可隐藏字幕，`--reflections` 可开启轻微地板反射。
 更多选项见[录像说明](docs/WF_COMMAND_TRAINING_CN.md#录制策略视频)。
+
+可直接回放生成的参考数据，无需策略 checkpoint：
+
+```bash
+python -m supermimic.wf.reference_play --reference-dir outputs/<参考目录> --presentation
+python -m supermimic.wf.reference_play --reference-dir outputs/<参考目录> \
+  --source trajectories --level 3 --count 2 --presentation
+```
+
+默认在参考目录的 `visualizations/` 中输出 MP4、TCP 路径和时间曲线 PNG、来源 JSON。
+详见[参考库可视化说明](docs/WF_COMMAND_TRAINING_CN.md#可视化生成的参考库)。
 
 ### 4. 检查固定底盘六轴机械臂
 

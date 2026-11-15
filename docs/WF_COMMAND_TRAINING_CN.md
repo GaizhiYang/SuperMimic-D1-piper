@@ -296,6 +296,8 @@ python -m supermimic.wf.export   --checkpoint ... --output outputs/wf_cmd_gpu/po
 
 `supermimic.wf.play` 复用 `evaluate_policy` 的物理评估过程，在每个物理控制步之后
 观察场景并渲染，不启动训练或世界模型。默认无窗口，CPU 运行策略与 MuJoCo，EGL 渲染。
+画面显示 URDF 中的机器人外形网格，地板为白色/浅灰色棋盘格。外形使用独立渲染模型，
+按关节同步真实仿真姿态，碰撞、质量、惯量和 checkpoint 的物理哈希保持原样。
 
 ```bash
 # 在运行 WF 训练的 Python 环境中安装录像依赖：
@@ -304,18 +306,79 @@ python -m pip install 'imageio>=2.30,<3' 'imageio-ffmpeg>=0.5,<1'
 # 目录自动选择 ckpt_latest.pt；也可以直接指定 actor_0003000.pt 等文件：
 python -m supermimic.wf.play --checkpoint outputs/wf_cmd_gpu --episodes 3 --level 0
 
-# 固定底座前进 0.1 m/s，同时追踪随机采样的末端目标：
+# 固定底座前进 0.1 m/s，同时追踪轨迹库采样的末端位姿：
 python -m supermimic.wf.play --checkpoint outputs/wf_cmd_gpu \
   --episodes 1 --command 0.1 0 0 --video outputs/wf_cmd_gpu/videos/forward.mp4
+
+# 显式指定某次参考生成得到的轨迹库：
+python -m supermimic.wf.play --checkpoint outputs/wf_cmd_gpu --level 0 \
+  --trajectory-library outputs/<参考目录>/trajectories
 ```
 
-默认输出为 `CHECKPOINT_DIR/videos/preview_iterXXXXXXX_levelN.mp4`，旁边保存同名 JSON，
-包含 checkpoint 迭代数、每个回合的目标、失败判定、保持成功和最终误差。
+默认从轨迹库采样末端位姿指令，并沿用 checkpoint 的轨迹调度参数；旧 checkpoint 使用默认调度：
+每 250 个控制步（5 秒）采样一段轨迹，每 5 步（0.1 秒）更新目标，所有录制回合均使用轨迹。
+库路径优先使用 `--trajectory-library`，其次为 checkpoint 保存的路径。旧 checkpoint 未保存路径时，
+在对应输出根目录和仓库 `outputs/` 中按目录名从新到旧查找兼容库。
+会校验物理哈希、目标坐标系、采样周期、初始机械臂姿态、课程等级及数据文件校验和；
+找不到兼容库时报告错误，并提示用 `--trajectory-library` 指定。启动时打印实际选中的绝对路径与指纹。
+需要复现原先的随机静态目标时，可添加 `--static-goals`。
+
+若要观察更大范围的机械臂运动，可独立生成一条用于预览的连续扫动轨迹，随后从头播放整条路线：
+
+```bash
+python -m supermimic.wf.preview_trajectory --checkpoint outputs/wf_cmd_gpu \
+  --output outputs/previews/wide_sweep/trajectories --duration-s 60 --level 3
+python -m supermimic.wf.play --checkpoint outputs/wf_cmd_gpu \
+  --trajectory-library outputs/previews/wide_sweep/trajectories \
+  --full-trajectory --episodes 1 --level 3 --command 0 0 0 \
+  --video outputs/previews/wide_sweep/preview.mp4
+```
+
+这套预览命令独立于训练库和课程等级配置；`--level 3` 选择新库中的大范围路线。
+生成时在机械臂关节和动作范围内规划并逐帧检查名义站姿下的碰撞，再根据速度上限分配时间。
+`--duration-s` 指定期望时长，满足速度上限所需的实际时长可能更长，以生成的 manifest 为准。
+`--full-trajectory` 从轨迹第一个采样点开始，每个控制步更新目标；未传 `--steps` 时，
+回合时长自动采用整条路线的长度，不再每 5 秒重新抽取短片段。`--command 0 0 0` 将底座速度指令设为零。
+旁边的 `commands.csv` 可直接查看各时刻的末端位置与四元数，坐标系见 manifest 的 `follow_frame`。
+重新生成时指定新的输出目录。
+
+汇报展示可直接添加 `--presentation`。该预设默认采用 **1920×1080、50 FPS、4 倍 MSAA**，
+开启主光/补光与地面投影、浅色天空和简洁字幕，相机缩近至 2.5 米并平滑跟随底盘。
+50 FPS 对应当前配置的 20 ms 控制步，不改变物理步长或播放速度。
+
+```bash
+python -m supermimic.wf.play --checkpoint outputs/wf_cmd_gpu \
+  --trajectory-library outputs/previews/wide_sweep/trajectories \
+  --full-trajectory --episodes 1 --level 3 --command 0 0 0 \
+  --presentation --title "Whole-body Trajectory Tracking" \
+  --video outputs/previews/wide_sweep/presentation.mp4
+```
+
+| 参数 | 显示效果 |
+| --- | --- |
+| `--presentation` | 一键使用上述展示预设；显式参数仍优先 |
+| `--hud compact` / `--hud full` / `--hud none` | 简洁标题与误差 / 完整诊断字幕 / 隐藏字幕 |
+| `--title "Whole-body Tracking"` | 简洁字幕中的标题 |
+| `--reflections` / `--no-reflections` | 开启 / 关闭地板轻微镜面反射；默认关闭 |
+| `--shadows` / `--no-shadows` | 开启 / 关闭地面投影；展示预设默认开启 |
+| `--msaa 0/2/4/8` | 抗锯齿采样数；默认 4，0 为关闭 |
+| `--camera-azimuth 135 --camera-elevation -18` | 调整水平视角与俯仰角，单位为度 |
+| `--camera-distance 2.5` | 相机距离，单位为米 |
+| `--camera-mode follow` / `--camera-mode fixed` | 跟随底盘 / 固定机位；底盘运动时建议跟随 |
+| `--width 1920 --height 1080 --fps 50` | 分辨率与帧率，可覆盖预设 |
+
+所有灯光、材质、阴影和相机设置仅作用于展示模型，策略输入、动力学与评估结果保持原样。
+每个视频的 JSON 会保存实际使用的显示参数。更高的分辨率和抗锯齿会增加录像渲染时间。
+
+默认输出为 `CHECKPOINT_DIR/videos/preview_iterXXXXXXX_levelN_trajectory.mp4`（静态目标后缀为 `_static`），
+展示预设在文件名末尾追加 `_presentation`。
+旁边保存同名 JSON，包含 checkpoint 迭代数、轨迹库路径与指纹、调度配置、每回合的追踪成功比例、
+均方根误差、失败判定和最终误差。
 每个回合默认录制训练配置中的 600 个控制步（12 秒），结束后停留 1 秒；失败时提前结束，
 保留真实失败画面。30 FPS 按物理时间采样，录像速度不依赖机器的渲染速度。
 
 绿色球为目标位置，橙色球为实际 TCP，RGB 箭头表示目标姿态。画面文字显示指令、
-末端误差、成功/失败以及仿真时间；世界坐标网格方便观察底座运动。
+末端误差、追踪/失败状态以及仿真时间；世界坐标网格方便观察底座运动。
 默认跟随相机距离为 2.8 米，可以用 `--camera-distance` 调整。
 常用参数还有 `--steps 600`、`--seed 20000`、`--fps 30`、`--width 1280 --height 720`。
 不指定 `--level` 时使用完整 checkpoint 保存的课程等级，Actor 快照则默认等级 0。
@@ -323,6 +386,52 @@ python -m supermimic.wf.play --checkpoint outputs/wf_cmd_gpu \
 
 脚本默认设置 `MUJOCO_GL=egl`。若机器使用其他已配置的渲染后端，可在启动进程前设置
 `MUJOCO_GL=osmesa` 或 `MUJOCO_GL=glfw`；策略推理的 `--device` 与渲染后端相互独立，物理始终在 CPU 上运行。
+
+### 可视化生成的参考库
+
+`supermimic.wf.reference_play` 直接读取参考文件，输出机器人动画 MP4、TCP 三维路径及
+x/y/z 时间曲线 PNG，以及记录来源和选中编号的 JSON。无需策略 checkpoint，也不启动训练。
+
+参考根目录通常包含两类数据：
+
+| 子目录 / `--source` | 可视化内容 |
+| --- | --- |
+| `library/` / `clips` | 按原始记录的全身状态回放真实仿真参考动作；模式 1 的目标随底盘搬运，模式 0 的目标在世界坐标中固定 |
+| `trajectories/` / `trajectories` | 在生成时的名义站姿下播放保存的机械臂关节与 TCP 指令；视频明确标为运动学回放 |
+
+传入根目录时默认选择 `library/`，也可直接传入某一子目录。脚本校验文件哈希、物理配置与数据维度。
+末端指令库的运动学动画用于检查目标路径形状，实际策略跟随效果仍用 `supermimic.wf.play` 录制。
+
+```bash
+conda activate supermimic-wfarm
+WF_REFERENCE_DIR=outputs/wf_cmd_refs_20261115_220027_884431
+
+# 自动选取各等级的代表片段，默认最多 3 段；输出视频、曲线图和 JSON：
+python -m supermimic.wf.reference_play --reference-dir "$WF_REFERENCE_DIR" --presentation
+
+# 指定两个参考动作编号，编号从 0 开始：
+python -m supermimic.wf.reference_play --reference-dir "$WF_REFERENCE_DIR" \
+  --indices 490 197 --presentation
+
+# 查看 level 3 的两条末端指令轨迹：
+python -m supermimic.wf.reference_play --reference-dir "$WF_REFERENCE_DIR" \
+  --source trajectories --level 3 --count 2 --presentation
+
+# 只画曲线，不生成视频；--plot-frame world 可改为世界坐标：
+python -m supermimic.wf.reference_play --reference-dir "$WF_REFERENCE_DIR" \
+  --source trajectories --count 4 --plot-only
+
+# 列出数据数量、等级及当前选中的编号，无需加载机器人资产：
+python -m supermimic.wf.reference_play --reference-dir "$WF_REFERENCE_DIR" --list --count 4
+```
+
+默认输出到参考根目录的 `visualizations/`，文件名为 `references_clips.*` 或
+`references_trajectories.*`；指定 `--level` 时追加等级后缀。`--video`、`--plot` 可指定输出位置。
+曲线默认采用底盘坐标，便于查看机械臂本身的活动范围；`--plot-frame world` 显示含底盘移动的全局路径。
+每段按原始物理时间播放，末尾停留 1 秒。`--presentation` 使用展示灯光和简洁字幕，
+可用 `--width 1280 --height 720 --fps 30` 加快录制，或用 `--hud none` 隐藏字幕。
+`--no-plot` 可仅录视频；缺少曲线绘图依赖时安装 `python -m pip install 'matplotlib>=3.8,<4'`。
+独立复制的末端指令库若没有同级物理参考库配置，需传入生成它的 `--config`。
 
 ---
 
