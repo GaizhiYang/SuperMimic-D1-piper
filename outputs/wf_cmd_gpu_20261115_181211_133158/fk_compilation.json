@@ -1,0 +1,11 @@
+{
+  "stage": "compiled",
+  "wall_s": 277.3996275210229,
+  "batch_sizes": [
+    2048,
+    8192
+  ],
+  "device": "cuda:0",
+  "rng_preserved": true,
+  "task_or_parameters_changed": false
+}

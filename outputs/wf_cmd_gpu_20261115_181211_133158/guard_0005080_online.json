@@ -1,0 +1,17 @@
+{
+  "guard_accepted": false,
+  "guard_reason": "online_failure_spike",
+  "guard_best_return": 5.371449118852615,
+  "guard_best_failure_rate": 0.0,
+  "guard_best_success_rate": 0.5775568156968802,
+  "guard_learning_rate_scale": 0.25,
+  "guard_accept_count": 3,
+  "guard_reject_count": 40,
+  "guard_online_failure_rate": 0.061651611328125,
+  "guard_online_failure_limit": 0.01,
+  "guard_step_fraction": 0.0,
+  "discarded_actor_updates": 79,
+  "accepted_actor_updates": 31,
+  "guard_iteration": 5080,
+  "guard_level": 0
+}
