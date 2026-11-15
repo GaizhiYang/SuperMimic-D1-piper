@@ -8,7 +8,7 @@
   "update_every": 1,
   "replay_steps": 256,
   "log_interval": 20,
-  "checkpoint_interval": 1000,
+  "checkpoint_interval": 500,
   "keep_actor_checkpoints": true,
   "checkpoint_replay": false,
   "cpu_threads": 8,
@@ -37,7 +37,7 @@
     ]
   ],
   "sim": {
-    "num_envs": 4096,
+    "num_envs": 8192,
     "dt": 0.02,
     "timestep": 0.005,
     "episode_steps": 600,
