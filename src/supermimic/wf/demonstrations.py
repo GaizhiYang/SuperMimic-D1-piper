@@ -17,7 +17,7 @@ class Demonstrations:
         raw=(self.directory/"manifest.json").read_bytes()
         self.manifest=json.loads(raw)
         self.fingerprint=hashlib.sha256(raw).hexdigest()
-        self.query_inputs=None;self.query_fraction=query_fraction
+        self.query_inputs=None;self.query_fraction=query_fraction;self.query_scale=None
         self.query_target_mode=None
         self.command_fraction=command_fraction
         self.zero_start_fraction=zero_start_fraction
@@ -107,6 +107,28 @@ class Demonstrations:
             self.query_scale=(self.query_actions[self.query_training]-previous[self.query_training]).std(0).clamp_min(.0002)
             self.fingerprint=hashlib.sha256((self.fingerprint+hashlib.sha256(Path(query_file).read_bytes()).hexdigest()).encode()).hexdigest()
 
+    def add_queries(self,task,state,previous,goal,action):
+        """Aggregate teacher labels at learner-visited states (DAgger).
+
+        Labels are executable [-1, 1] commands of the same offline teacher as
+        the clips, so they are scaled exactly like clip targets. They only
+        enter BC; world-model replay and validation clips are unchanged.
+        """
+        if self.query_inputs is not None and self.query_scale is not None:
+            raise ValueError('DAgger labels cannot be mixed with an external query_file')
+        state,previous,goal,action=(x.to(self.device,torch.float32) for x in (state,previous,goal,action))
+        if not all(torch.isfinite(x).all() for x in (state,previous,goal,action)) or (action.abs()>1.00001).any():
+            raise ValueError('non-finite or unexecutable DAgger label')
+        with torch.no_grad():inputs=task.actor_input(state,previous,task.command_goal(goal)).detach()
+        if self.query_inputs is None:
+            self.query_inputs,self.query_actions=inputs,action
+        else:
+            self.query_inputs=torch.cat((self.query_inputs,inputs));self.query_actions=torch.cat((self.query_actions,action))
+        self.query_training=torch.arange(len(self.query_inputs),device=self.device)
+        self.query_validation=self.query_training[:0]
+        self.query_scale=None
+        return len(self.query_inputs)
+
     def indices(self,n,horizon=1,validation=False):
         if not 1<=horizon<=self.length: raise ValueError("invalid reference window")
         pool=self.validation if validation else self.training
@@ -145,7 +167,9 @@ class Demonstrations:
             pool=self.query_validation if validation else self.query_training
             rows=pool[torch.randint(len(pool),(qn,),device=self.device)]
             inputs=torch.cat((inputs,self.query_inputs[rows]));target=torch.cat((target,self.query_actions[rows]))
-            scale=torch.cat((scale.expand(rn,-1),self.query_scale.expand(qn,-1)))
+            # None: labels share the clip targets' semantics (DAgger relabels).
+            query_scale=scale if self.query_scale is None else self.query_scale
+            scale=torch.cat((scale.expand(rn,-1),query_scale.expand(qn,-1)))
         if noise_std and not validation:
             # Sensor augmentation only. This does NOT create world-model labels
             # or claim perturbed states were executed by the simulator.

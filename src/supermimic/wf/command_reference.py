@@ -254,6 +254,26 @@ def execute(sim, task, goal, path, *, kinematics, steps, settle_steps, arm_lower
                 initial_mj_state=snapshot["integration_state"][0], initial_state_flag=snapshot["state_flag"])
 
 
+def teacher_setup(cfg, sim, stabilise_posture=True):
+    """Arm limits, wheel geometry and posture gains shared by every teacher.
+
+    ``sim`` is a one-world simulator of the training model; it is reset and
+    settled here. The same values are used by the reference generator and by
+    DAgger relabelling, so both query the identical offline controller.
+    """
+    s, c = sim.spec, cfg.sim
+    lower, upper = s.low.copy(), s.high.copy()
+    if cfg.policy.action_lower:
+        lower = np.maximum(lower, s.q0 + s.action_scale * np.asarray(cfg.policy.action_lower))
+        upper = np.minimum(upper, s.q0 + s.action_scale * np.asarray(cfg.policy.action_upper))
+    lower = np.maximum(lower, s.q0 - s.action_scale)[16:]
+    upper = np.minimum(upper, s.q0 + s.action_scale)[16:]
+    sim.reset(); sim.settle(steps=c.reset_settle_steps)
+    kinematics = wheel_kinematics(sim)
+    posture = posture_sensitivity(sim, c.reset_settle_steps) if stabilise_posture else None
+    return lower, upper, kinematics, posture
+
+
 # ----------------------------------------------------------------- workers
 _W: dict = {}
 
@@ -266,16 +286,7 @@ def _init_worker(raw_config, options):
         asset_dir=cfg.asset_dir, leg_action_scale=c.leg_action_scale, arm_action_scale=c.arm_action_scale,
         wheel_action_scale=c.wheel_action_scale, arm_initial_position=c.arm_initial_position)
     task = WholeBodyTask(sim.model, sim.spec, reward_cfg=cfg.reward)
-    s = sim.spec
-    lower, upper = s.low.copy(), s.high.copy()
-    if cfg.policy.action_lower:
-        lower = np.maximum(lower, s.q0 + s.action_scale * np.asarray(cfg.policy.action_lower))
-        upper = np.minimum(upper, s.q0 + s.action_scale * np.asarray(cfg.policy.action_upper))
-    lower = np.maximum(lower, s.q0 - s.action_scale)[16:]
-    upper = np.minimum(upper, s.q0 + s.action_scale)[16:]
-    sim.reset(); sim.settle(steps=c.reset_settle_steps)
-    kinematics = wheel_kinematics(sim)
-    posture = posture_sensitivity(sim, c.reset_settle_steps) if options.get("stabilise_posture", True) else None
+    lower, upper, kinematics, posture = teacher_setup(cfg, sim, options.get("stabilise_posture", True))
     _W.update(cfg=cfg, sim=sim, task=task, lower=lower, upper=upper, kinematics=kinematics,
               posture=posture, options=options)
 

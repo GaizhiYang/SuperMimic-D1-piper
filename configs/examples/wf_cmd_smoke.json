@@ -54,7 +54,12 @@
     "warp_nconmax": 64,
     "warp_njmax": 320,
     "warp_cuda_graph": true,
-    "reset_bank_batches": 1
+    "reset_bank_batches": 1,
+    "exploration_group_std": [
+      0.12,
+      0.06,
+      0.04
+    ]
   },
   "model": {
     "hidden": [
@@ -101,9 +106,9 @@
     "goal_conditioning": "encoded",
     "goal_position_scale": 0.1,
     "goal_relabel_fraction": 0.0,
-    "horizon_progress": "attempted",
+    "horizon_progress": "accepted",
     "goal_skip_lr_scale": 1.0,
-    "ignore_previous_action": false,
+    "ignore_previous_action": true,
     "action_mode": "absolute",
     "action_delta_limit": 0.01,
     "architecture": "mlp",
@@ -270,7 +275,10 @@
     "reference_anchor_episodes": 0,
     "success_metric": "tracking_success_rate",
     "rejection_lr_factor": 0.7,
-    "success_tolerance": 0.05
+    "success_tolerance": 0.05,
+    "online_failure_rate": 0.01,
+    "online_failure_factor": 3.0,
+    "online_failure_window": 5
   },
   "demonstrations": {
     "directory": "outputs/wf_cmd_refs_smoke/library",
@@ -291,7 +299,7 @@
     "policy_start_steps": 0,
     "task_selection_episodes": 0,
     "query_file": null,
-    "query_fraction": 0.75,
+    "query_fraction": 0.5,
     "goal_bank_fraction": 0.25,
     "goal_bank_position_noise": 0.02,
     "goal_bank_rotation_noise": 0.05,
@@ -300,7 +308,12 @@
     "command_sampling_fraction": 0.5,
     "zero_start_sampling_fraction": 0.0,
     "broad_anchor_sampling_fraction": 0.0,
-    "validate_initial_states": false
+    "validate_initial_states": false,
+    "dagger_rounds": 1,
+    "dagger_interval": 10,
+    "dagger_episodes": 4,
+    "dagger_beta": 0.5,
+    "dagger_beta_decay": 0.5
   },
   "trajectory": {
     "library": "outputs/wf_cmd_refs_smoke/trajectories",

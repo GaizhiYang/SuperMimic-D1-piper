@@ -10,6 +10,7 @@ collector is a correctness backend; --device cuda moves learning, not physics.
 from __future__ import annotations
 
 import argparse
+import faulthandler
 from dataclasses import asdict
 import copy
 import hashlib
@@ -117,6 +118,7 @@ class Trainer:
         self.reference_pretrain_updates = 0
         self.reference_model_pretrain_updates = 0
         self.reference_selection = None
+        self.dagger_round, self.dagger_data, self.dagger_oracle, self.dagger_sha256 = 0, [], None, None
         self.response_check=None
         self.model_response_ready=False
         self.response_last_check=-1
@@ -199,6 +201,7 @@ class Trainer:
             if cfg.guard.enabled else None)
         self.guard_level = self.level
         self.guard_verified_iteration = -1
+        self.online_failures, self.online_reference_rate = [], None
         if cfg.resume:
             self.load(cfg.resume)
         elif cfg.warm_start:
@@ -353,7 +356,7 @@ class Trainer:
         # Independent small excitation, around nominal posture during burn-in.
         # This is not an expert action or a pretrained stabilizing policy.
         std=(self.cfg.sim.delta_exploration_std if self.cfg.policy.action_mode in ('delta','target') and not identifying
-             else self.cfg.sim.exploration_std)
+             else self.exploration_std())
         action = (command + std * torch.randn_like(command)).clamp(-1, 1)
         if self.cfg.sim.exploration_delta_limit is not None:
             limit=self.cfg.sim.exploration_delta_limit
@@ -415,6 +418,51 @@ class Trainer:
                 "sim_contact_fraction": float(np.mean(metrics["wheel_contact"])),
                 "sim_slip_m_s": float(np.sum(metrics["slip"]) / max(1, np.sum(metrics["wheel_contact"]))),
                 "sim_failed_this_step": int(failed.sum())}
+
+    def exploration_std(self):
+        groups=self.cfg.sim.exploration_group_std
+        if groups is None:
+            return self.cfg.sim.exploration_std
+        if getattr(self,'_exploration_std',None) is None:
+            leg,wheel,arm=(float(x) for x in groups)
+            names=list(self.task.spec.joint_names)
+            std=torch.full((len(names),),leg,device=self.device)
+            std[self.task.wheel_indices]=wheel
+            std[torch.tensor([i for i,n in enumerate(names) if n.startswith('piper_')],dtype=torch.long,device=self.device)]=arm
+            self._exploration_std=std
+        return self._exploration_std
+
+    def track_online_failures(self, failed):
+        """Roll back a collapsing candidate before the next physical check.
+
+        A window measured while the accepted policy is (almost) unchanged sets
+        the reference rate, which includes exploration noise and friction
+        randomization. A later window above max(absolute, factor*reference)
+        restores the accepted snapshot exactly as a physical rejection does.
+        """
+        g=self.cfg.guard
+        if self.guard is None or g.online_failure_rate is None or self.guard._weights is None:
+            return {}
+        self.online_failures.append(failed/self.cfg.sim.num_envs)
+        if len(self.online_failures)<g.online_failure_window:
+            return {}
+        rate=float(np.mean(self.online_failures));self.online_failures.clear()
+        if self.pending_actor_updates<g.online_failure_window:
+            self.online_reference_rate=rate if self.online_reference_rate is None else min(self.online_reference_rate,rate)
+            return {'guard_online_failure_rate':rate,'guard_online_reference_failure_rate':self.online_reference_rate}
+        limit=max(g.online_failure_rate,g.online_failure_factor*(self.online_reference_rate or 0.))
+        result={'guard_online_failure_rate':rate,'guard_online_failure_limit':limit}
+        if rate<=limit:
+            return result
+        critic_args=(self.critic,self.critic_opt) if g.rollback_critic else ()
+        outcome=self.guard.reject(self.actor,self.actor_opt,*critic_args,reason='online_failure_spike')
+        outcome.update(result,guard_step_fraction=0.,discarded_actor_updates=self.pending_actor_updates,
+                       accepted_actor_updates=self.accepted_actor_updates,guard_iteration=self.iteration,guard_level=self.level)
+        self.pending_actor_updates=0
+        self.guard_verified_iteration=self.iteration
+        (self.output/f'guard_{self.iteration:07d}_online.json').write_text(json.dumps(outcome,indent=2,allow_nan=False)+'\n')
+        print(json.dumps(outcome,allow_nan=False),flush=True)
+        return outcome
 
     def update_model(self):
         c = self.cfg.model
@@ -787,6 +835,9 @@ class Trainer:
         outcome["guard_iteration"] = self.iteration
         outcome["guard_level"] = self.level
         self.guard_verified_iteration = self.iteration
+        self.online_failures.clear()
+        if rebase or outcome["guard_accepted"]:
+            self.online_reference_rate = None  # a new incumbent: measure its own rate
         suffix = "baseline" if rebase else "candidate"
         (self.output / f"guard_{self.iteration:07d}_{suffix}.json").write_text(
             json.dumps({"evaluation": evaluation, "decision": outcome, "backtracking": trials}, indent=2, allow_nan=False)+"\n")
@@ -810,6 +861,7 @@ class Trainer:
             "reference_selection":self.reference_selection,
             "model_response_ready":self.model_response_ready,"response_last_check":self.response_last_check,
             "reference_fingerprint":self.demonstrations.fingerprint if self.demonstrations is not None else None,
+            "dagger":dict(round=self.dagger_round,file='dagger_queries.npz',sha256=self.dagger_sha256),
             "world_model": self.wm.state_dict(), "critic": self.critic.state_dict(),
             "wm_opt": self.wm_opt.state_dict(), "actor_opt": self.actor_opt.state_dict(),
             "critic_opt": self.critic_opt.state_dict(), "replay": replay,
@@ -955,6 +1007,17 @@ class Trainer:
         expected_fingerprint=self.demonstrations.fingerprint if self.demonstrations is not None else None
         if ck.get("reference_fingerprint")!=expected_fingerprint:
             raise ValueError("reference library changed since checkpoint")
+        dagger=ck.get('dagger') or {}
+        if dagger.get('round',0):
+            from .dagger import load_queries
+            labels=Path(path).parent/dagger['file']  # saved next to the checkpoint
+            if not labels.is_file() or hashlib.sha256(labels.read_bytes()).hexdigest()!=dagger['sha256']:
+                raise ValueError(f'DAgger labels missing or changed since checkpoint: {labels}')
+            q=load_queries(labels)
+            self.demonstrations.add_queries(self.task,q['state'],q['previous'],q['goal'],q['action'])
+            self.dagger_round,self.dagger_sha256=dagger['round'],dagger['sha256']
+            if labels.resolve()!=(self.output/dagger['file']).resolve():
+                (self.output/dagger['file']).write_bytes(labels.read_bytes())
         if ck.get('excitation_fingerprint')!=(self.excitation.fingerprint if self.excitation is not None else None):
             raise ValueError('real-excitation data changed since checkpoint')
         self.reference_pretrain_updates=ck.get("reference_pretrain_updates",0)
@@ -1034,6 +1097,9 @@ class Trainer:
                 torch.nn.utils.clip_grad_norm_(self.actor.parameters(),self.cfg.policy.grad_clip,error_if_nonfinite=True)
                 self.actor_opt.step()
                 self.reference_pretrain_updates+=1
+                if (self.dagger_round<d.dagger_rounds
+                        and self.reference_pretrain_updates==d.dagger_interval*(self.dagger_round+1)):
+                    self.run_dagger_round(log)
                 if self.reference_pretrain_updates%d.validation_interval==0:
                     with torch.no_grad():
                         # Fixed full validation clips: selection has no minibatch noise.
@@ -1067,6 +1133,30 @@ class Trainer:
         if self.guard is not None:
             self.latest.update(self.check_guard(rebase=True))
         self.save("ckpt_reference.pt")
+
+    def run_dagger_round(self, log):
+        """Relabel learner-visited states with the offline teacher (DAgger)."""
+        from .dagger import TeacherOracle, collect_corrections, save_queries
+        d=self.cfg.demonstrations
+        if self.dagger_oracle is None:
+            self.dagger_oracle=TeacherOracle(self.cfg,self.sim.model,self.sim.spec,self.demonstrations)
+        generator=torch.Generator().manual_seed(self.cfg.seed+31000+self.dagger_round)
+        pool=self.demonstrations.training.cpu()
+        rows=(pool[torch.randperm(len(pool),generator=generator)[:d.dagger_episodes]] if len(pool)>=d.dagger_episodes
+              else pool[torch.randint(len(pool),(d.dagger_episodes,),generator=generator)])
+        actor,task=self.evaluation_modules()
+        started=time.monotonic()
+        beta=d.dagger_beta*d.dagger_beta_decay**self.dagger_round
+        data,stats=collect_corrections(actor,task,self.dagger_oracle,self.demonstrations,rows,beta=beta,
+                                       seed=self.cfg.seed+32000+self.dagger_round)
+        self.dagger_data.append(data)
+        total=self.demonstrations.add_queries(self.task,data['state'],data['previous'],data['goal'],data['action'])
+        path=save_queries(self.output/'dagger_queries.npz',self.dagger_data)
+        self.dagger_sha256=hashlib.sha256(path.read_bytes()).hexdigest()
+        self.dagger_round+=1
+        record=dict(dagger_round=self.dagger_round,reference_pretrain_updates=self.reference_pretrain_updates,
+                    total_labels=total,elapsed_s=round(time.monotonic()-started,1),**stats)
+        line=json.dumps(record,allow_nan=False);print(line,flush=True);log.write(line+'\n');log.flush()
 
     def pretrain_reference_model(self):
         """Optional simulator-transition bootstrap; online fitting continues later."""
@@ -1127,6 +1217,7 @@ class Trainer:
                    and (self.cfg.actor_update_limit is None or self.actor_updates<self.cfg.actor_update_limit)):
                 metrics = self.collect()
                 self.iteration += 1
+                self.latest.update(self.track_online_failures(metrics['sim_failed_this_step']))
                 if self.iteration >= self.cfg.warmup_steps and self.iteration % self.cfg.update_every == 0:
                     for optimizer, base_lr in ((self.wm_opt, self.cfg.model.lr),
                                                (self.actor_opt, self.cfg.policy.lr),
@@ -1195,6 +1286,7 @@ class Trainer:
 
 
 def main():
+    faulthandler.enable()  # Python stack for native aborts (MuJoCo/Warp/CUDA)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", help="JSON config with nested sim/model/policy/curriculum groups")
     parser.add_argument("--smoke", action="store_true", help="small pipeline check, not a trained policy")

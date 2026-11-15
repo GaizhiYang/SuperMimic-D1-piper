@@ -203,22 +203,42 @@ class PolicyGuard:
                 self.best_success = success if safer or self.best_success is None else max(self.best_success, success)
             self.accepted += 1
         else:
-            actor.load_state_dict(self._weights["actor"])
-            # Optimizer loading can retain tensor references (notably Adam's
-            # CPU step counter, and CPU moments). The next candidate must not
-            # mutate the accepted snapshot through those shared references.
-            actor_opt.load_state_dict(_snapshot(self._weights["actor_opt"]))
-            if with_critic:
-                critic.load_state_dict(self._weights["critic"])
-                critic_opt.load_state_dict(_snapshot(self._weights["critic_opt"]))
-            self.learning_rate_scale = max(self.min_lr_scale,
-                self.learning_rate_scale*self.rejection_lr_factor)
-            self.rejected += 1
+            self._restore(actor, actor_opt, critic, critic_opt)
         return {"guard_accepted": accepted, "guard_reason": reason,
                 "guard_return": score, "guard_failure_rate": failure,
                 "guard_best_return": self.best_return, "guard_best_failure_rate": self.best_failure,
                 "guard_best_success_rate": self.best_success,
                 "guard_held_success_rate": success if self.prefer_success else evaluation.get("final_held_success_rate"),
+                "guard_learning_rate_scale": self.learning_rate_scale,
+                "guard_accept_count": self.accepted, "guard_reject_count": self.rejected}
+
+    def _restore(self, actor, actor_opt, critic, critic_opt):
+        actor.load_state_dict(self._weights["actor"])
+        # Optimizer loading can retain tensor references (notably Adam's
+        # CPU step counter, and CPU moments). The next candidate must not
+        # mutate the accepted snapshot through those shared references.
+        actor_opt.load_state_dict(_snapshot(self._weights["actor_opt"]))
+        if "critic" in self._weights:
+            if critic is None or critic_opt is None:
+                raise ValueError("candidate must use the same critic snapshot configuration as baseline")
+            critic.load_state_dict(self._weights["critic"])
+            critic_opt.load_state_dict(_snapshot(self._weights["critic_opt"]))
+        self.learning_rate_scale = max(self.min_lr_scale,
+            self.learning_rate_scale*self.rejection_lr_factor)
+        self.rejected += 1
+
+    def reject(self, actor, actor_opt, critic=None, critic_opt=None, reason="rejected"):
+        """Restore the accepted snapshot without a physical evaluation.
+
+        For evidence gathered outside the fixed validation fixture (e.g. a
+        collapse of the online collector). Best metrics stay unchanged.
+        """
+        if self._weights is None:
+            raise RuntimeError("capture_baseline must run before a rejection")
+        self._restore(actor, actor_opt, critic, critic_opt)
+        return {"guard_accepted": False, "guard_reason": str(reason),
+                "guard_best_return": self.best_return, "guard_best_failure_rate": self.best_failure,
+                "guard_best_success_rate": self.best_success,
                 "guard_learning_rate_scale": self.learning_rate_scale,
                 "guard_accept_count": self.accepted, "guard_reject_count": self.rejected}
 

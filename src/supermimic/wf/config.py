@@ -15,6 +15,10 @@ class SimConfig:
     friction_min: float = 0.6
     friction_max: float = 1.2
     exploration_std: float = 0.12
+    # Optional per-group std (leg, wheel, arm) in normalized action units,
+    # replacing exploration_std for absolute actions. One shared std moves
+    # wide-range arm joints far more (in radians) than the legs.
+    exploration_group_std: tuple[float, float, float] | None = None
     delta_exploration_std: float = .0003
     exploration_delta_limit: float | None = None
     reset_joint_noise: float = 0.015
@@ -137,6 +141,13 @@ class GuardConfig:
     success_metric: str = "final_held_success_rate"  # used by prefer_success
     success_tolerance: float = 0.  # accepted decrease of the success metric (evaluation noise band)
     rejection_lr_factor: float = .5
+    # Online trip-wire: roll back to the accepted policy without waiting for the
+    # next physical check when the collector's failure rate per env-step over
+    # `online_failure_window` iterations exceeds max(online_failure_rate,
+    # online_failure_factor * reference rate of the accepted policy). None: off.
+    online_failure_rate: float | None = None
+    online_failure_factor: float = 3.
+    online_failure_window: int = 20
 
 
 @dataclass
@@ -169,6 +180,15 @@ class DemonstrationConfig:
     zero_start_sampling_fraction: float = 0.
     broad_anchor_sampling_fraction: float = 0.
     validate_initial_states: bool = False  # Include real recovery/switch initial state and command.
+    # DAgger: every `dagger_interval` BC updates, roll the beta-mixed learner
+    # out from `dagger_episodes` training clip starts (CPU MuJoCo) and add the
+    # offline CommandTeacher's labels at the visited states to BC
+    # (sampled with `query_fraction`). beta_r = dagger_beta * dagger_beta_decay**r.
+    dagger_rounds: int = 0
+    dagger_interval: int = 1000
+    dagger_episodes: int = 64
+    dagger_beta: float = .5
+    dagger_beta_decay: float = .5
 
 
 @dataclass
@@ -234,6 +254,13 @@ class TrainConfig:
         if not 0<=d.broad_anchor_sampling_fraction<=1:raise ValueError('invalid broad-anchor reference sampling fraction')
         if (d.pretrain_updates or d.model_pretrain_updates) and not d.directory:
             raise ValueError("reference pretraining requires a dataset directory")
+        if d.dagger_rounds:
+            if d.dagger_rounds<0 or d.dagger_interval<1 or d.dagger_episodes<1 or not d.directory or d.query_file:
+                raise ValueError('DAgger needs demonstrations.directory, positive interval/episodes and no query_file')
+            if d.dagger_rounds*d.dagger_interval>=d.pretrain_updates:
+                raise ValueError('dagger_rounds*dagger_interval must be below pretrain_updates so the last labels are trained on')
+            if not 0<=d.dagger_beta<=1 or not 0<=d.dagger_beta_decay<=1 or not 0<d.query_fraction<1:
+                raise ValueError('dagger_beta, dagger_beta_decay must be in [0,1] and query_fraction in (0,1)')
         if not 0<=d.query_fraction<=1 or (d.query_file and not d.directory):
             raise ValueError('corrective queries require a parent reference library and a valid mixture fraction')
         if not 0<=d.goal_bank_fraction<=1 or min(self.guard.reference_episodes,self.guard.reference_anchor_episodes,d.goal_bank_position_noise,d.goal_bank_rotation_noise)<0:
@@ -299,6 +326,12 @@ class TrainConfig:
             raise ValueError('tracking_success_rate requires trajectory.library')
         if not 0<self.guard.rejection_lr_factor<=1:raise ValueError('guard.rejection_lr_factor must be in (0,1]')
         if not 0<=self.guard.success_tolerance<1:raise ValueError('guard.success_tolerance must be in [0,1)')
+        if self.guard.online_failure_rate is not None and (not 0<self.guard.online_failure_rate<1
+                or self.guard.online_failure_factor<1 or self.guard.online_failure_window<1):
+            raise ValueError('guard.online_failure_rate must be in (0,1), factor >= 1, window >= 1')
+        groups=self.sim.exploration_group_std
+        if groups is not None and (len(groups)!=3 or any(not 0<=float(x)<=1 for x in groups)):
+            raise ValueError('sim.exploration_group_std must be three values (leg, wheel, arm) in [0,1]')
         if self.policy.goal_conditioning not in ("encoded", "direct") or self.policy.goal_position_scale <= 0:
             raise ValueError("invalid goal conditioning/position scale")
         if self.policy.action_mode not in ("absolute","delta","target") or self.policy.action_delta_limit<=0:

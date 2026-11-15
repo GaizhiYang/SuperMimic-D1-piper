@@ -139,3 +139,67 @@ def test_generated_library_is_reachable_and_level_ordered(tmp_path):
     assert stats["0"]["max_tcp_speed_m_s"] <= gt.LEVEL_TCP_SPEED[0] + 1e-6
     with np.load(tmp_path / "traj/trajectories.npz") as d:
         assert d["poses"].shape == (4, 200, 7) and np.isfinite(d["poses"]).all()
+
+
+def test_guard_reject_restores_and_cuts_lr():
+    guard = PolicyGuard(rejection_lr_factor=.7, min_lr_scale=.25)
+    actor = torch.nn.Linear(1, 1); opt = torch.optim.Adam(actor.parameters())
+    guard.capture_baseline(dict(budgeted_reward_mean=1., failure_rate=0., target_hash="x"), actor, opt)
+    before = actor.weight.detach().clone()
+    with torch.no_grad():
+        actor.weight += 1.
+    out = guard.reject(actor, opt, reason="online_failure_spike")
+    assert not out["guard_accepted"] and out["guard_reason"] == "online_failure_spike"
+    assert torch.equal(actor.weight, before)
+    assert guard.rejected == 1 and abs(guard.learning_rate_scale - .7) < 1e-12
+
+
+def _tripwire(tmp_path, window=4):
+    from supermimic.wf.train import Trainer
+    guard = PolicyGuard(rejection_lr_factor=.7)
+    actor = torch.nn.Linear(1, 1); opt = torch.optim.Adam(actor.parameters())
+    guard.capture_baseline(dict(budgeted_reward_mean=1., failure_rate=0., target_hash="x"), actor, opt)
+    cfg = SimpleNamespace(guard=SimpleNamespace(online_failure_rate=.01, online_failure_factor=3.,
+                          online_failure_window=window, rollback_critic=False),
+                          sim=SimpleNamespace(num_envs=100))
+    t = SimpleNamespace(cfg=cfg, guard=guard, actor=actor, actor_opt=opt, critic=None, critic_opt=None,
+                        online_failures=[], online_reference_rate=None, pending_actor_updates=0,
+                        accepted_actor_updates=0, guard_verified_iteration=-1, iteration=0, level=0,
+                        output=tmp_path)
+    return t, (lambda failed: Trainer.track_online_failures(t, failed))
+
+
+def test_online_tripwire_reference_then_rollback(tmp_path):
+    t, step = _tripwire(tmp_path)
+    for _ in range(4):
+        step(1)  # accepted policy: 1% per env-step -> reference
+    assert abs(t.online_reference_rate - .01) < 1e-9
+    t.pending_actor_updates = 10
+    for _ in range(4):
+        out = step(2)  # 2% < 3 x reference: tolerated
+    assert out["guard_online_failure_limit"] == pytest.approx(.03) and t.guard.rejected == 0
+    for _ in range(4):
+        out = step(5)
+    assert out["guard_reason"] == "online_failure_spike" and t.guard.rejected == 1
+    assert t.pending_actor_updates == 0 and (tmp_path / "guard_0000000_online.json").exists()
+
+
+def test_online_tripwire_absolute_floor(tmp_path):
+    t, step = _tripwire(tmp_path)
+    for _ in range(4):
+        step(0)
+    t.pending_actor_updates = 10
+    for _ in range(4):
+        out = step(.5)  # 0.5% < 1% absolute floor although reference is zero
+    assert t.guard.rejected == 0 and out["guard_online_failure_limit"] == pytest.approx(.01)
+
+
+def test_exploration_and_tripwire_config_validation():
+    from supermimic.wf.evaluate import config_from_dict
+    raw = json.loads((ROOT / "configs/examples/wf_cmd_smoke.json").read_text())
+    for patch in ({"sim": {"exploration_group_std": [.1, .1]}}, {"guard": {"online_failure_rate": 1.5}}):
+        bad = json.loads(json.dumps(raw))
+        for group, values in patch.items():
+            bad[group].update(values)
+        with pytest.raises(ValueError):
+            config_from_dict(bad).validate()

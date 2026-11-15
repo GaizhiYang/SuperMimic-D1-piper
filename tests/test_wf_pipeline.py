@@ -158,6 +158,10 @@ def fake_python(tmp_path):
                 output = Path(config["output"])
                 output.mkdir(parents=True, exist_ok=True)
                 (output / "ckpt_latest.pt").write_text("fake checkpoint")
+                crashes = Path(os.environ.get("WF_TEST_CRASHES", "/nonexistent"))
+                if crashes.is_file() and int(crashes.read_text()) > 0:
+                    crashes.write_text(str(int(crashes.read_text()) - 1))
+                    sys.exit(134)  # like a native abort
             elif module == "supermimic.wf.evaluate":
                 assert Path(option("--checkpoint")).is_file()
                 if "--reference-library" in args:
@@ -291,3 +295,22 @@ def test_shell_pipeline_generates_trajectory_library_next_to_references(fake_pyt
     assert Path(argument(trajectory, "--output")) == references / "trajectories"
     assert Path(train["config"]["trajectory"]["library"]) == references / "trajectories"
     assert train["config"]["trajectory"]["segment_steps"] == 250
+
+
+@pytest.mark.parametrize("crashes,retries,ok", [(2, 3, True), (2, 1, False)])
+def test_shell_pipeline_resumes_training_after_crash(fake_python, tmp_path, crashes, retries, ok):
+    env, log = fake_python
+    source, _ = write_config(tmp_path / "runs")
+    counter = tmp_path / "crashes"
+    counter.write_text(str(crashes))
+    env.update(CONFIG=str(source), REFS=str(tmp_path / "refs"), WF_TEST_CRASHES=str(counter),
+               TRAIN_RETRIES=str(retries))
+    result = subprocess.run(["bash", "scripts/wf_cmd_pipeline.sh", "1", "2"], cwd=ROOT, env=env, text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
+    training = [call for call in read_calls(log) if call["module"].endswith(".train")]
+    assert "--resume" not in training[0]["args"]
+    assert all("--resume" in call["args"] for call in training[1:])
+    if ok:
+        assert result.returncode == 0 and len(training) == 3
+    else:
+        assert result.returncode == 134 and len(training) == 2

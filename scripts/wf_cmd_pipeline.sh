@@ -12,7 +12,7 @@
 # Including stage 1 starts a fresh run with matching timestamped output folders.
 # Continue an existing run with CONFIG=outputs/<run>/pipeline_config.json and stage 2+.
 # Env:    CONFIG (default configs/examples/wf_cmd_gpu4096.json), REFS (reference path prefix),
-#         REF_COUNT (512), TRAJ_PER_LEVEL (256), WORKERS (nproc-1), CUDA_VISIBLE_DEVICES, WFARM_ASSET_DIR
+#         REF_COUNT (512), TRAJ_PER_LEVEL (256), TRAIN_RETRIES (3), WORKERS (nproc-1), CUDA_VISIBLE_DEVICES, WFARM_ASSET_DIR
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -26,6 +26,7 @@ CONFIG=${CONFIG:-configs/examples/wf_cmd_gpu4096.json}
 REFS=${REFS:-outputs/wf_cmd_refs}
 REF_COUNT=${REF_COUNT:-512}
 TRAJ_PER_LEVEL=${TRAJ_PER_LEVEL:-256}
+TRAIN_RETRIES=${TRAIN_RETRIES:-3}
 WORKERS=${WORKERS:-$(( $(nproc) > 1 ? $(nproc) - 1 : 1 ))}
 if (( FIRST <= 1 && 1 <= LAST )); then
   CONFIG=$(python scripts/prepare_wf_run.py --config "$CONFIG" --refs-base "$REFS")
@@ -61,11 +62,26 @@ fi
 
 if (( FIRST <= 2 && 2 <= LAST )); then
   mkdir -p "$OUT"
-  if [[ -f "$OUT/ckpt_latest.pt" ]]; then
-    run python -m supermimic.wf.train --config "$CONFIG" --resume "$OUT/ckpt_latest.pt" 2>&1 | tee -a "$OUT/train.log"
-  else
-    run python -m supermimic.wf.train --config "$CONFIG" 2>&1 | tee -a "$OUT/train.log"
-  fi
+  # A native crash (e.g. "double free or corruption") resumes from the last
+  # checkpoint up to TRAIN_RETRIES times; Ctrl+C (exit 130) is never retried.
+  # PYTHONFAULTHANDLER prints the Python stack of such a crash into train.log.
+  export PYTHONFAULTHANDLER=1
+  attempt=0
+  while true; do
+    args=(--config "$CONFIG")
+    [[ -f "$OUT/ckpt_latest.pt" ]] && args+=(--resume "$OUT/ckpt_latest.pt")
+    if run python -m supermimic.wf.train "${args[@]}" 2>&1 | tee -a "$OUT/train.log"; then
+      break
+    else
+      status=$?
+    fi
+    attempt=$(( attempt + 1 ))
+    if (( status == 130 || attempt > TRAIN_RETRIES )) || [[ ! -f "$OUT/ckpt_latest.pt" ]]; then
+      echo "training exited with status $status (attempt $attempt); not retrying" >&2
+      exit "$status"
+    fi
+    echo "training exited with status $status; resuming from $OUT/ckpt_latest.pt (retry $attempt/$TRAIN_RETRIES)" | tee -a "$OUT/train.log" >&2
+  done
 fi
 
 if (( FIRST <= 3 && 3 <= LAST )); then
