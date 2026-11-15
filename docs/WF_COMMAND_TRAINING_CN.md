@@ -225,6 +225,19 @@ python -m supermimic.wf.goal_trajectory --config configs/examples/wf_cmd_gpu4096
 
 新增的配置项改变了 `sim`、`policy`、`guard`、`curriculum` 配置组，所以旧 checkpoint 不能直接 `--resume`，需要从阶段 1 重新开始。
 
+### 针对 2026-11-15 运行（`…181211_133158`）的修正：level 一直是 0
+
+| 现象 | 证据 |
+|---|---|
+| BC 初值明显变好 | 守卫 baseline：跟踪成功率 0.50，失败率 0；之前的运行只有 0.03 |
+| 在线阶段学不动 | 14214 次迭代里只接受过 1 次候选（第 2000 次，跟踪成功率 0.578），accepted_actor_updates=31。之后的 48 次守卫全部拒绝，在线熔断 79 次。课程评估从第 2000 次之后一直是 0.537，升级阈值是 0.6 |
+| 每次回滚后 Actor 很快发散 | 回滚后 `reference_bc_loss` 约为 0.02，几十次更新后升到 1–90；同时 `actor_grad_norm` 达到 300–760，`critic_loss` 达到 1e4–1.8e6 |
+| 时域被锁死在 8 | `horizon_progress="accepted"`，接受的更新太少，时域始终停在 `initial_horizon=8` |
+
+**原因**：时域只有 8 步（0.16 s）时，Actor 的目标主要来自 Critic 在第 8 步的自举值。这时 Critic 还很差（而且每次拒绝都跟着回滚），梯度方向不可靠，几十次更新就把策略带坏，于是候选被拒、时域无法增长，形成死锁。之前两次运行（`010048`、`133130`）用的是 `attempted`，被拒的更新也在推高时域：前者在时域约 22–23、后者在约 19–21 时才首次接受候选，之后学习一直正常。
+
+**修改**：`policy.initial_horizon` 从 8 改为 20，`horizon_ramp_updates` 从 4000 改为 2000，保留 `horizon_progress="accepted"`。在线阶段从一开始就在已验证能学的时域工作，每次迭代的耗时也会相应增加（H=8 时约 0.75 s/迭代）。
+
 `wf_cmd_gpu`（第 3000 次迭代，level 0）本身已经能用：静态目标 94% 成功，底盘速度误差约 0.002 m/s，末端误差约 1 cm。下次分析时请一并提供 `metrics.jsonl`、`train.log` 和 `reference_pretrain.jsonl`，这次的记录里没有这几个文件。
 
 ```bash
