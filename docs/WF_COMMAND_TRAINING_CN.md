@@ -214,7 +214,57 @@ python -m supermimic.wf.export   --checkpoint ... --output outputs/wf_cmd_gpu/po
 
 导出格式为 `wf_command_unified_torchscript_v2`，输入 `world_goal` 为 `[N,11]`，元数据写在 `policy.pt.json`。
 
-### 录制策略视频
+### 录制连续末端轨迹视频
+
+查看大范围末端运动时，使用 `play_trajectories`：它从本次训练的目标轨迹库中，按末端
+包围盒跨度选择指定 level 的大范围轨迹，完整播放一条路径，每个控制步更新目标位姿。
+录像开始先平滑接近轨迹起点，再播放整条轨迹，最后保持终点；中途不做训练时每 5 秒的
+随机窗口切换。起点接近段使用五次关节插值规划目标，机器人动作始终由保存的 Actor
+在真实 MuJoCo 物理中产生。
+
+```bash
+conda activate supermimic-wfarm
+# 录像依赖（若尚未安装）：
+python -m pip install -r requirements-wf-media.txt
+
+# 为这次训练各录制一段：静止、前进、转向。
+bash scripts/wf_record_trajectories.sh outputs/wf_cmd_gpu_20261116_190019_821523
+
+# 单独看较慢的静止大范围末端运动：
+bash scripts/wf_record_trajectories.sh outputs/wf_cmd_gpu_20261116_190019_821523 \
+  --scenario stationary --speed 0.4
+
+# 自定义底盘速度：前进 0.2 m/s、偏航 0.03 rad/s：
+bash scripts/wf_record_trajectories.sh outputs/wf_cmd_gpu_20261116_190019_821523 \
+  --scenario forward --command 0.2 0 0.03 --speed 0.5
+```
+
+默认参数：`--scenario all --clips 1 --level 3 --speed 0.75 --lead-in-s 4 --hold-s 2`，
+分辨率 1280×720、30 FPS。`--speed` 必须大于 0 且不超过 1，减小它会延长轨迹运动时间。
+底盘速度由 `--command VX VY WZ` 设置，覆盖所选场景的默认速度；与 `--scenario all` 一起用时，
+三个场景均使用该组速度，建议选单一场景。`VX`、`VY` 是机体系前向、侧向线速度（m/s），
+`WZ` 是机身偏航角速度（rad/s）；它们与控制末端轨迹播放速度的 `--speed` 相互独立。
+默认 `--frame follow` 使路径跟随底座；`--scenario stationary --frame world` 将路径固定在世界系。
+世界系路径只支持零底盘速度指令。
+`--trajectory-id ID` 指定单条轨迹，`--library PATH` 覆盖 checkpoint 中记录的目标轨迹库。
+`--clips N` 控制每个场景的片段数；其余可选项包括 `--output-dir`、`--fps`、`--width`、
+`--height`、`--device`、`--asset-dir`、`--seed`、`--friction`，以及相机的
+`--camera-distance`、`--camera-azimuth`、`--camera-elevation`。
+完整参数可用 `python -m supermimic.wf.play_trajectories --help` 查看。
+
+默认 `--appearance visual` 使用原始 URDF 的 STL/DAE 可视网格及材质显示机器人，地面为明亮的
+白色/浅灰色棋盘网格，便于观察关节、轮子和末端运动。需要查看碰撞几何时可设
+`--appearance collision`。外观选项只改变渲染，仿真物理和目标轨迹保持一致。
+
+默认保存到训练目录下新建的 `videos/trajectories_<timestamp>/`：每段有 MP4、同名 JSON、
+NPZ 逐步轨迹和 PNG 预览，另有汇总 `summary.json`。视频显示完整目标路径、已走过的目标轨迹与
+实际 TCP 轨迹，便于比较运动范围及滞后；JSON 记录位置/姿态跟踪误差、运动范围和失败，
+这里关注运动中的跟踪效果，而非仅在终点保持成功。失败录像也会保留，不按成功率筛片。
+库中轨迹经过运动学可行性检查，策略仍可能跟不上或失败。
+跟踪统计排除起步接入段，包含末端保持段；失败后未执行的步数计为跟踪未达标。
+这里复用训练轨迹库，适合观察动作和误差，不能据此判断未见轨迹上的泛化效果。
+
+### 录制原有评估视频
 
 `supermimic.wf.play` 复用 `evaluate_policy` 的物理评估过程，在每个物理控制步之后
 观察场景并渲染，不启动训练或世界模型。默认无窗口，CPU 运行策略与 MuJoCo，EGL 渲染。

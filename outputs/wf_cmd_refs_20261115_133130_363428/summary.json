@@ -1,9 +1,0 @@
-{
-  "clips": 512,
-  "requested": 512,
-  "rejected": 0,
-  "command_clips": 405,
-  "stationary_clips": 107,
-  "library": "outputs/wf_cmd_refs_20261115_133130_363428/library",
-  "elapsed_s": 154.3
-}

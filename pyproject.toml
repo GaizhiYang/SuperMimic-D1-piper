@@ -9,7 +9,7 @@ dependencies = ["torch>=2.5,<3", "numpy>=1.26,<3", "mujoco>=3.10,<4", "scipy>=1.
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<10"]
-media = ["imageio>=2.30,<3", "imageio-ffmpeg>=0.5,<1", "matplotlib>=3.8,<4"]
+media = ["imageio>=2.30,<3", "imageio-ffmpeg>=0.5,<1", "Pillow>=10,<13", "matplotlib>=3.8,<4"]
 teacher = ["osqp>=0.6.7,<0.7", "quadprog>=0.1.13,<0.2"]
 # Batched MuJoCo Warp collection for WF training (sim.backend = "warp").
 # Tested locally with mujoco 3.16.0, mujoco-warp 3.16.0, warp-lang 1.19.0.

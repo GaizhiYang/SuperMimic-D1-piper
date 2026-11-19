@@ -2,3 +2,4 @@
 -r requirements-wf.txt
 imageio>=2.30,<3
 imageio-ffmpeg>=0.5,<1
+Pillow>=10,<13

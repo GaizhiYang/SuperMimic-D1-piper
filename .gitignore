@@ -34,6 +34,7 @@
 # *.mjb
 
 # Training outputs, data, diagnostics and media
+/outputs/
 /data/
 /artifacts/
 /logs/

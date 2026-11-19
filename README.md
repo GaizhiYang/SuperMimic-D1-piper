@@ -1,238 +1,318 @@
-# SuperMimic-Agent-WFArm
+# SuperMimic-D1-Piper
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.x-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org/)
-[![MuJoCo](https://img.shields.io/badge/Simulation-MuJoCo-009688)](https://mujoco.org/)
-[![Status](https://img.shields.io/badge/Status-Exploratory-orange)](docs/PROJECT_ANALYSIS_CN.md)
+[简体中文](README_CN.md) · **English** · [License](LICENSE) · [Attribution](NOTICE.md)
 
-**English · [简体中文](README_CN.md)**
+Learning wheel-legged mobile manipulation with a differentiable world model.
+This project adapts the SuperMimic learning approach to a D1 platform with four
+legs, four wheels and a six-axis Piper arm. A unified policy controls all 22
+actuators while following end-effector poses and, when enabled, chassis velocity
+commands.
 
-An exploratory open-source project on **wheel-legged mobile manipulation**. It studies how a four-wheel, four-leg platform and a six-joint arm can share a learned dynamics model, how a fixed-base arm can learn pose reaching and trajectory tracking, and how generated references can support that learning. Discussion, experiments and contributions are welcome.
+The main workflow covers reference generation, continuous TCP trajectory
+commands, CPU or GPU simulation, world-model training, policy optimization,
+physical evaluation and video recording. Fixed-base arm experiments and the
+inherited G1 implementation are also available as separate research branches.
+This is an independent research adaptation; it does not reproduce or claim the
+original papers' benchmark results or hardware validation.
 
-The main learning mechanism comes from [SuperMimic](https://arxiv.org/abs/2610.28480): fit a differentiable world model to real simulator transitions, then optimize the policy through short imagined rollouts. A [MimicAgent](https://arxiv.org/abs/2609.24145)-style frontend proposes reference motions and checks them before they enter training.
+## What is included
 
-This repository distributes training and evaluation code. Robot descriptions, meshes, calibration, datasets, checkpoints, videos and internal experiment reports are supplied separately or kept private. Full WF-Arm simulation requires authorized robot assets. The asset-free tests run without them.
+| Component | Implementation |
+|---|---|
+| Whole-body control | One Actor outputs 12 leg position commands, 4 wheel velocity commands and 6 arm position commands |
+| Differentiable dynamics | Learn simulator state transitions, then optimize the Actor through short imagined rollouts using BPTT |
+| Reference generation | Motor-driven MuJoCo rollouts with physical screening and optional imitation guidance |
+| Moving TCP commands | Collision-checked joint splines converted to position and orientation trajectories |
+| Simulation backends | Native CPU MuJoCo and batched MuJoCo Warp collection for GPU training |
+| Evaluation | Pose reaching, trajectory tracking, physical failures, friction changes and actuator ablations |
+| Recording | Full continuous trajectories, original robot visual meshes, a bright white/gray floor, target and actual TCP trails |
+| Export | TorchScript inference wrapper with the Actor and observation transforms |
 
----
+The control period in the example WF configurations is 20 ms (50 Hz), with a
+5 ms physics timestep. Position commands use the configured actuator scales;
+they are not joint torques. Quaternion inputs use **wxyz** order.
 
-**png**：<img width="1440" height="540" alt="fixed_arm_showcase_contact_sheet" src="https://github.com/user-attachments/assets/fec88e0f-fa53-402b-a322-af3309023700" />
+## How learning works
 
+1. Generate reference motions and execute their motor commands in MuJoCo.
+   Store accepted state/action transitions separately from TCP target paths.
+2. Collect additional transitions by running the current policy in physics,
+   then fit a differentiable dynamics model to replay windows.
+3. Freeze the world-model parameters during policy updates and backpropagate
+   task rewards through imagined rollouts. Optional behavior cloning and
+   reference-tracking losses guide the Actor.
+4. Evaluate the resulting Actor in MuJoCo. Curriculum and guard checks use
+   physical rollouts to assess progress and candidate updates.
 
-**video**：https://www.bilibili.com/video/BV1jcWb6BEKQ/?spm_id_from=333.1387.homepage.video_card.click&vd_source=3e0503d2af778f71bc1d1405b8a87d65
-
-
-**Process**:  
-In this project, the teacher is the expert demonstration data generator, the student is the control policy being trained, and the world model is responsible for learning the dynamics. The three are connected through the following process:  
-
-1. **Collect Data: Expert demonstrations and policy tries**  
-The MimicAgent trajectory program proposes the desired motion, and the demonstration controller executes it in MuJoCo via motor commands. The actual "state, action, next state" that passes the physical filter becomes the expert demonstration. The current policy also runs in MuJoCo to collect data from its own executions.  
-
-2. **Train the World Model: Learn the results of actions**  
-The world model uses real state transitions to learn "current state + action → next state," for example, how a joint position command changes the angles and velocities of a robotic arm. It’s responsible for predicting motion outcomes.  
-
-3. **Train the Control Policy: Learn what actions to output**  
-The student policy outputs actions based on the current state and targets. The world model predicts the resulting motion, and task rewards like end-point errors are used to backpropagate gradients through the world model to update the policy parameters. The world model parameters are temporarily fixed while updating the policy. Expert demonstration actions can also provide imitation guidance to help the policy learn.  
-
-4. **Test in MuJoCo: Check if the policy actually works**  
-The trained policy is used to control the robotic arm in practice, checking if reaching and tracking are successful, errors, collisions, or boundary violations. Actions that the expert can perform must be independently completed by the student to be considered learned. Accurate world model predictions still need actual control validation. Final independent test data is kept separate and not used for training.
-
-
-
----
-
-## What the name means
-
-- **SuperMimic**: the learned-world-model and backpropagation-through-time learning mechanism.
-- **Agent**: a reference-generation interface that keeps the task, phase plan, program and diagnostic feedback together. It currently accepts programs from a coding agent through files; it does not run an unattended external LLM service.
-- **WFArm**: the wheel-legged platform and its arm. Both whole-body coordination and a fixed-base arm task are included.
-
-## Project scope
-
-| Component | Control interface | Main source |
-|---|---|---|
-| Whole-body manipulation | One Actor produces 12 leg position commands, 4 wheel velocity commands and 6 arm position commands | `src/supermimic/wf/` |
-| Fixed-base arm baseline | Six rate-limited joint position targets; TCP pose/twist goals in the base frame | `frameworks/fixed_base_arm/arm_smc/` |
-| Structured arm controller | Collision-checked reaching references, learned task feedback gains and a retained posture policy | `frameworks/fixed_base_arm/variants/supermimic_robust_control_v7/arm_smc/` |
-| Reference frontend | Task/plan/program, forward-kinematics checks, diagnostic feedback, optional physical screening | `src/supermimic/mimicagent/` |
-| Evaluation | Held terminal poses, continuous tracking, failure checks and reference split validation | The corresponding task and evaluation modules |
-
-The whole-body policy and the fixed-base arm are separate control settings. The structured arm implementation uses planning and analytic Jacobian feedback in addition to learning. Its behavior should not be described as a pure neural controller. The repository does not establish full-workspace or hardware qualification.
-
-The inherited G1 motion-tracking code is kept as a compact research foundation for the common dynamics, FK and BPTT machinery. G1 tracking is not the focus of the WF-Arm work.
-
-## MimicAgent × SuperMimic
-
-The two methods meet at the reference data interface:
-
-1. **MimicAgent-style generation** turns a task and phase plan into a trajectory program, checks the proposal and passes diagnostic feedback to revisions.
-2. **Physical execution and screening** run the motor commands in MuJoCo. Only independently accepted real state/action sequences become demonstration data.
-3. **SuperMimic-style learning** uses those references for model fitting, optional BC and imagined state-tracking guidance, together with transitions collected by the current student policy.
-4. **Real-physics evaluation** checks the learned student separately from the reference generator and its offline teacher.
-
-The frontend supplies useful proposals; the learned world model and BPTT train the controller. This is the integration implemented here. It does not establish the original papers' benchmark results or show that reference generation has already improved the final student.
-
-## Learning mechanism
-
-Let $s_t$ be the simulator state, $a_t$ the executed command and $\xi$ the environment context. The learned transition is
-
-$$
-\hat{s}_{t+1}=F_\theta(\hat{s}_t,a_t,\xi).
-$$
-
-The model predicts bounded residuals around explicit state integration. It is trained autoregressively over $K$ steps:
-
-$$
-\mathcal{L}_{\mathrm{WM}}
-=\frac{1}{K}\sum_{k=1}^{K}
-\left(\frac1m\left\|E(\hat{s}_{t+k},s_{t+k})\right\|_2^2
-+\beta\,\mathrm{BCE}(\hat d_{t+k},d_{t+k})\right).
-$$
-
-$E$ is a scaled state error and $\hat d$ is a failure estimate. The WF whole-body implementation uses $\beta=0.1$. Analytic forward kinematics supplies differentiable TCP observations and task rewards.
-
-During an Actor update, world-model and Critic parameters are frozen while gradients through their inputs remain available:
-
-$$
-J(\phi)=\mathbb{E}\!\left[
-\sum_{t=0}^{H-1}\gamma^t C_t r_{t+1}
-+\gamma^H C_H V_\psi(\hat s_H,g_H,\xi)
-\right],\qquad
-C_t=\prod_{j=1}^{t}(1-\hat d_j).
-$$
-
-The policy maximizes $J$ through BPTT; optional BC and reference-tracking losses provide guidance. The Critic uses a detached $\lambda$-return target. Failure probabilities limit imagined continuation, but they do not replace actual collision and limit checks.
-
-The six-axis structured branch additionally learns bounded positive task feedback gains. A damped Jacobian maps the task-space correction to joint motion, while a posture or planned-reference term fills the remaining directions. Its complete equations and the differences between branches are explained in the [Chinese project analysis](docs/PROJECT_ANALYSIS_CN.md).
-
-## Repository layout
-
-```text
-src/supermimic/
-  wf/                     Whole-body simulation, model, policy and training
-  mimicagent/             Reference proposal and physical-screening frontend
-  world_model/            Shared learned-dynamics utilities
-  imagination/            Imagined rollouts and Actor/Critic objectives
-  kinematics/             Differentiable kinematics
-frameworks/fixed_base_arm/
-  arm_smc/                Six-axis baseline training and inference
-  variants/supermimic_robust_control_v7/arm_smc/
-                          Structured arm training and planning
-configs/examples/         Portable examples without private robot parameters
-examples/mimicagent/       Small trajectory programs and a phase plan
-scripts/                  Selected training/data/evaluation entry points
-tests/                    Release tests
-third_party/              Attribution, not vendored robot assets
-tools/                    Release preparation and content audit
-docs/                     Project analysis, asset setup and repository metadata
-```
-
-The research workspace may contain additional local history. It is not part of the GitHub release.
+A reference motion that a teacher can execute is different from a task that the
+learned Actor can complete. The TCP trajectory library provides commands and
+nominal kinematic feasibility; it is not a collection of successful policy
+rollouts. The learned world model and offline teacher are not needed for Actor
+inference.
 
 ## Installation
 
-The WF path uses Python 3.11 or 3.12. The local CPU reference environment was Python 3.11, PyTorch 2.7, MuJoCo 3.10 and NumPy 1.26. A CUDA-enabled PyTorch installation accelerates learning; the WF reference simulator itself runs on the CPU.
+Use Linux with Python **3.11 or 3.12**. The recording and GPU workflows have been
+checked with MuJoCo **3.16**, PyTorch **2.7** and Python **3.11**. Start with an
+isolated environment:
 
 ```bash
-git clone https://github.com/Robot-Nav/SuperMimic-Agent-WFArm.git
-cd SuperMimic-Agent-WFArm
+git clone https://github.com/GaizhiYang/SuperMimic-D1-piper.git
+cd SuperMimic-D1-piper
 python3.11 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install -e '.[dev]'
+python -m pip install -e '.[dev,media]' 'mujoco~=3.16.0'
 ```
 
-| Dependency | Role | Installation |
-|---|---|---|
-| PyTorch | Dynamics, policies, autograd and optimization | Base |
-| MuJoCo | Motor-driven physics, contacts and model inspection | Base |
-| NumPy, SciPy | Data processing, numerical routines and rotations | Base |
-| pytest | Tests | `.[dev]` |
-| OSQP, quadprog | Optional offline QP teachers | `.[teacher]` |
-| imageio, imageio-ffmpeg, matplotlib | Optional recording and plots | `.[media]` |
-| mjlab, MuJoCo Warp, Warp and G1 data tools | Inherited G1 path | `.[g1]`, Python 3.12 in a separate environment |
-
-Install a PyTorch wheel matching your GPU and driver before using CUDA. The G1 extra has its own pinned mjlab revision and newer simulation stack; it is not required for WF training.
-
-## Running
-
-### 1. Run the asset-free tests
+For NVIDIA GPU training, install a CUDA-enabled PyTorch build appropriate for
+your driver, then add the GPU backend:
 
 ```bash
-python -m pytest -q tests/test_release_core.py
+python -m pip install -e '.[dev,media,gpu]'
 ```
 
-These check state integration, Actor/Critic objectives, gradients, asset lookup and release boundaries. They do not measure robot skill.
+| Extra | Purpose |
+|---|---|
+| `dev` | pytest |
+| `media` | MP4 encoding, image annotations and plots |
+| `gpu` | MuJoCo 3.16, MuJoCo Warp and Warp |
+| `teacher` | Optional OSQP/quadprog teachers used by other WBC experiments |
+| `g1` | Separate inherited G1 stack; not required for D1/Piper training |
 
-### 2. Connect authorized private assets
+The main command-reference and TCP-trajectory generators do not require the
+`teacher` extra. Native CPU MuJoCo handles evaluation and recording even when
+training collection uses Warp. Headless recording defaults to EGL; the host
+must provide a working OpenGL/EGL runtime.
+
+## Robot model
+
+The current source tree includes `wf-arm-tbot/`, containing the URDF, referenced
+collision and visual meshes, robot configuration and TCP definition. The asset
+resolver finds this directory automatically. To select it explicitly, or use an
+external copy:
 
 ```bash
-export WFARM_ASSET_DIR=/path/to/authorized/wf-arm-tbot
+export WFARM_ASSET_DIR="$PWD/wf-arm-tbot"
 python tools/check_assets.py
 ```
 
-The directory contains the private URDF, its referenced collision meshes, joint metadata and TCP calibration. The fixed-base task also reads private operating limits. See [asset setup](docs/PRIVATE_ASSETS.md). None of these files should be added to Git.
+Expected layout:
 
-### 3. Check the whole-body training loop
+```text
+wf-arm-tbot/
+  urdf/wf-arm-tbot.urdf
+  meshes/
+  config/robot.json
+  config/robot_calibration.json
+  config/operating_limits.json     # also used by the fixed-base arm adapter
+```
+
+An explicit `--asset-dir` or configuration `asset_dir` overrides the environment
+variable. Evaluation checks the model's physics fingerprint against the
+checkpoint, so use the same assets and actuator configuration as training.
+Asset availability and redistribution rights are separate; see [licensing](#licensing-and-acknowledgements).
+
+## Quick start
+
+Run commands from the repository root with the environment activated.
+
+### Check the code and CPU training loop
 
 ```bash
+# Core tests without loading the robot model.
+python -m pytest -q -m 'not private_assets' tests/test_release_core.py
+
+# Small integration run: 4 environments, 64 iterations.
 python -m supermimic.wf.train --smoke --device cpu --output outputs/wf_smoke
 ```
 
-For a longer experiment, copy `configs/examples/wf_train.json`, select a fresh output directory and set the training budget:
+The smoke run checks the training loop, not policy convergence. For a longer CPU
+experiment, use or copy `configs/examples/wf_train.json` and set a fresh output
+directory:
 
 ```bash
 python -m supermimic.wf.train --config configs/examples/wf_train.json
 ```
 
-The example is a starting configuration, not a published trained policy. Use `--resume` for a full checkpoint continuation. `--warm-start` transfers a different subset of state and has different training semantics.
+### Train with chassis commands and moving TCP targets
 
-### 4. Check the six-axis baseline
+The GPU pipeline performs these stages:
 
-Run from the repository root:
+| Stage | Work |
+|---|---|
+| `0` | Dependency, asset, CUDA and Warp/CPU consistency checks |
+| `1` | Generate physically screened references and TCP trajectory libraries |
+| `2` | Reference pretraining, online collection, dynamics fitting and Actor/Critic updates |
+| `3` | MuJoCo evaluation across curriculum levels, reference validation, friction and ablations |
+| `4` | TorchScript export |
+
+For a small GPU integration run:
 
 ```bash
+CONFIG=configs/examples/wf_cmd_smoke.json \
+REF_COUNT=10 TRAJ_PER_LEVEL=4 WORKERS=4 \
+bash scripts/wf_cmd_pipeline.sh 0 4
+```
+
+For the full preset:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 WORKERS=8 bash scripts/wf_cmd_pipeline.sh 0 4
+```
+
+The default configuration is named `wf_cmd_gpu4096.json`, but currently specifies
+**8192 environments and 30000 iterations**. Adjust environment counts, batch
+sizes and generation workers for your hardware before starting a full run.
+The small command preset also requires a CUDA GPU; use `train --smoke` for the
+CPU check.
+
+Including stage `1` creates matching timestamped reference and training
+directories under `outputs/`. The script prints their paths and saves
+`pipeline_config.json` in the training directory. Use that saved configuration
+to continue the same run:
+
+```bash
+# Replace this value with the training directory printed by the pipeline.
+RUN_DIR=outputs/wf_cmd_gpu_YYYYMMDD_HHMMSS_SUFFIX
+CONFIG="$RUN_DIR/pipeline_config.json" bash scripts/wf_cmd_pipeline.sh 2 3
+```
+
+### Evaluate a checkpoint
+
+Use a checkpoint **file** for the evaluation and export modules:
+
+```bash
+python -m supermimic.wf.evaluate \
+  --checkpoint "$RUN_DIR/ckpt_latest.pt" --level 3 --episodes 64 \
+  --output "$RUN_DIR/eval_level3.json"
+
+python -m supermimic.wf.evaluate \
+  --checkpoint "$RUN_DIR/ckpt_latest.pt" --static-goals --level 3 \
+  --output "$RUN_DIR/eval_static.json"
+```
+
+Evaluation uses the checkpoint's TCP trajectory library by default when one is
+configured. `--static-goals` selects reaching targets instead. Other options
+include `--ablation all`, `--friction`, and `--reference-library` with
+`--reference-split validation`. Keep the referenced libraries available when
+moving a training directory.
+
+Report trajectory tracking success, position/orientation RMS errors and physical
+failure rate together. Tracking statistics count unexecuted steps after a
+failure as misses. A low dynamics-model error, a successful teacher or an
+attractive recording alone does not establish policy performance. Use separate
+held-out requests to assess generalization.
+
+### Record continuous trajectories
+
+For a command-conditioned checkpoint with a generated TCP trajectory library:
+
+```bash
+# Record stationary, forward and gentle-turning scenarios.
+bash scripts/wf_record_trajectories.sh "$RUN_DIR"
+
+# Set chassis forward/lateral speeds and yaw rate: m/s, m/s, rad/s.
+bash scripts/wf_record_trajectories.sh "$RUN_DIR" \
+  --scenario turn --command 0.2 0 0.03
+
+# Slow the TCP path and select three distinct large-range paths.
+bash scripts/wf_record_trajectories.sh "$RUN_DIR" \
+  --scenario stationary --speed 0.4 --clips 3
+```
+
+The recorder selects complete paths by spatial extent, adds a smooth approach
+and updates the target every control step. It does not randomly switch trajectory
+windows during a clip. The defaults are level 3, 0.75× path speed, 1280×720 and
+30 FPS. Videos play at simulation time, independent of rendering speed.
+
+`--command VX VY WZ` overrides the chosen scenarios' base commands. `--speed`
+controls TCP trajectory playback separately. The default `--frame follow`
+transports targets with the configured base-following frame;
+`--scenario stationary --frame world` anchors the path to the initial world pose
+and requires zero base velocity commands.
+
+Original URDF visual meshes/materials and a bright white/light-gray grid floor
+are enabled by default. Use `--appearance collision` to inspect collision
+geometry. Rendering uses a separate model and leaves policy physics unchanged.
+Cyan shows the complete target path, green the command trail and orange the
+actual TCP trail.
+
+Each recording saves MP4, JSON metrics, a control-rate NPZ trace and a PNG preview
+under `"$RUN_DIR/videos/trajectories_<timestamp>/"`. These previews reuse the
+training trajectory library; they do not measure unseen-trajectory performance.
+For static-target recordings, use `python -m supermimic.wf.play --help`.
+See the [recording guide](docs/WF_COMMAND_TRAINING_CN.md#录制连续末端轨迹视频) for more options.
+
+### Export inference
+
+```bash
+python -m supermimic.wf.export \
+  --checkpoint "$RUN_DIR/ckpt_latest.pt" --output "$RUN_DIR/policy_inference.pt"
+```
+
+For the command-conditioned WF policy, the wrapper accepts the canonical
+57-dimensional state, 22 previous executed actions and an 11-dimensional world
+goal: TCP position, quaternion wxyz, chassis vx/vy/wz and a command-mode flag.
+The adjacent export JSON describes the actual interface, joint order, actuator
+scales and physics fingerprint. The caller must maintain executed-action history
+and target-frame transport. Export does not include a simulator or hardware I/O.
+Exports refuse to overwrite an existing model or metadata file. The full
+pipeline already creates `policy.pt`; choose a fresh filename when exporting
+again after continuation.
+
+## Other experiments and source layout
+
+```text
+src/supermimic/wf/        Whole-body model, simulation, training, evaluation and recording
+src/supermimic/mimicagent/ Task/plan/program reference frontend
+src/supermimic/world_model/, imagination/, kinematics/
+                         Shared learning and differentiable-kinematics utilities
+frameworks/fixed_base_arm/ Six-axis baseline and structured-controller variant
+configs/examples/        CPU and GPU experiment presets
+scripts/                 Pipeline and recording wrappers
+tests/                   Core, physics, trajectory and rendering checks
+wf-arm-tbot/             Robot descriptions, meshes and model configuration
+outputs/                 Generated runs; ignored by Git
+docs/                    Detailed workflow and algorithm notes
+```
+
+The fixed-base arm baseline has a separate entry point:
+
+```bash
+python tools/check_assets.py --fixed-arm
 PYTHONPATH=src:frameworks/fixed_base_arm python -m arm_smc.train \
   --config configs/examples/fixed_arm_smoke.json
 ```
 
-This generates small disjoint reference sets and exercises learning and evaluation. Increase data, model and optimization budgets before studying performance. The structured branch retains earlier policy components and may require locally trained source checkpoints; its code is not a replacement for those training stages.
+The structured fixed-arm variant combines learned components with planning and
+analytic Jacobian feedback; it is separate from the unified whole-body Actor.
+See the [fixed-arm overview](frameworks/fixed_base_arm/README.md),
+[algorithm notes](docs/PROJECT_ANALYSIS_CN.md) and [script index](scripts/README.md).
+The inherited G1 code requires its own environment and data.
 
-### 5. Generate and screen references
+To run the robot-dependent WF tests explicitly:
 
 ```bash
-python scripts/wf_mimicagent_pilot.py \
-  --output outputs/mimicagent_reference --terminal-feedback
-
-python scripts/wf_mimicagent_smoke.py \
-  --library outputs/mimicagent_reference/physical_library \
-  --output outputs/mimicagent_training_check
+WFARM_ASSET_DIR="$PWD/wf-arm-tbot" python -m pytest -q tests
 ```
 
-The optional terminal feedback uses an existing offline teacher. Passing kinematic checks alone does not authorize a proposal as a real dynamics transition. The exporter admits only successful independently executed rollouts, verifies their hashes and keeps request-level training/validation separation.
+## Licensing and acknowledgements
 
-## Evaluation and limitations
+Project code is distributed under the [MIT license](LICENSE), retaining the
+upstream copyright notice. This work extends the independent
+[SuperMimic-Reproduced](https://github.com/CuboiLeo/SuperMimic-Reproduced)
+implementation by Yuxi Liu / CuboiLeo and draws on the SuperMimic learning and
+MimicAgent reference-generation approaches. Author attribution and research
+references are listed in [NOTICE](NOTICE.md).
 
-Report task success and physical failure separately. Reaching requires the terminal pose and velocity tolerances to hold over consecutive final frames. Tracking requires a sufficient fraction of the requested trajectory to meet the tolerances, including the denominator for frames lost after a failure. Keep test requests outside training, BC, world-model fitting and checkpoint selection.
+The code license does not grant additional rights to third-party robot
+resources. The bundled D1 description currently contains an unfilled license
+declaration in [package.xml](wf-arm-tbot/d1_description/package.xml); confirm the
+model and mesh redistribution terms with their source providers. Preserve
+separate notices, including the Apache-2.0 notice in the articulation adapter.
 
-Low world-model MSE, a completed training budget, successful reference trajectories and attractive animations answer different questions. None alone demonstrates a capable deployed policy. Current code includes local action-response audits, real-physics policy checks and replay-boundary handling to inspect these gaps. Experiments under 0.5–1.0 m/s whole-body motion need their own evaluation.
-
-## License, references and discussion
-
-### Acknowledgements
-
-- We thank the **SuperMimic authors** for the differentiable-world-model and BPTT learning framework.
-- We thank the **MimicAgent authors** for the prompt-to-trajectory and diagnostic-refinement approach.
-- We thank **Yuxi Liu / CuboiLeo** for the inherited SuperMimic-Reproduced implementation, and the maintainers of the simulation and learning libraries used here.
-
-Full paper titles, authors and project links are recorded in [NOTICE](NOTICE.md).
-
-Code is licensed under [MIT](LICENSE). Original copyright and attribution are retained; see [NOTICE](NOTICE.md) and [third-party references](third_party/README.md). Robot assets and local experimental products are not included in the software license.
-
-- [SuperMimic paper](https://arxiv.org/abs/2610.28480)
-- [MimicAgent paper](https://arxiv.org/abs/2609.24145)
-- [SuperMimic-Reproduced](https://github.com/CuboiLeo/SuperMimic-Reproduced)
-
-Use [Issues](https://github.com/Robot-Nav/SuperMimic-Agent-WFArm/issues) to discuss training behavior, reproducibility and alternative control designs. When reporting a problem, include the code revision, software versions, configuration and a concise failure description. Keep private robot files and credentials out of reports.
-
-[简体中文](README_CN.md) · [中文项目分析](docs/PROJECT_ANALYSIS_CN.md)
+For bug reports, use [Issues](https://github.com/GaizhiYang/SuperMimic-D1-piper/issues)
+and include the code revision, software versions, configuration and a short
+reproduction. Generated references, logs, checkpoints and videos belong under
+`outputs/`, which is excluded from Git tracking.

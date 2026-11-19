@@ -144,7 +144,7 @@
   "curriculum": {
     "initial_level": 0,
     "max_level": 3,
-    "eval_interval": 1000,
+    "eval_interval": 500,
     "eval_episodes": 32,
     "promote_success_rate": 0.6,
     "promote_checks": 2,

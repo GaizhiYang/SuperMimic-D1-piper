@@ -51,20 +51,24 @@ def command_goal(task, model, spec, cfg, seed, level, command, friction):
 
 class VideoRecorder:
     def __init__(self, model, spec, writer, *, width, height, fps, dt, steps,
-                 iteration, level, episodes, distance):
+                 iteration, level, episodes, distance, appearance="visual", visual_scene=None):
         from PIL import Image, ImageDraw, ImageFont
+        from .visuals import create_visual_scene
 
+        if appearance not in ("visual", "collision"):
+            raise ValueError("appearance must be visual or collision")
+        self.visual_scene = visual_scene or create_visual_scene(model, spec)
+        self.visual_scene.option.geomgroup[2] = appearance == "visual"
+        self.visual_scene.option.geomgroup[3] = appearance == "collision"
+        render_model = self.visual_scene.model
         self.Image, self.ImageDraw = Image, ImageDraw
         try:
             self.font = ImageFont.truetype("DejaVuSans.ttf", max(14, height // 38))
         except OSError:
             self.font = ImageFont.load_default()
-        model.vis.global_.offwidth = max(model.vis.global_.offwidth, width)
-        model.vis.global_.offheight = max(model.vis.global_.offheight, height)
-        model.vis.headlight.ambient[:] = .55
-        model.vis.headlight.diffuse[:] = .8
-        model.vis.headlight.specular[:] = .15
-        self.renderer = mujoco.Renderer(model, height=height, width=width)
+        render_model.vis.global_.offwidth = max(render_model.vis.global_.offwidth, width)
+        render_model.vis.global_.offheight = max(render_model.vis.global_.offheight, height)
+        self.renderer = mujoco.Renderer(render_model, height=height, width=width)
         self.spec, self.writer = spec, writer
         self.fps, self.dt, self.steps = fps, dt, steps
         self.iteration, self.level, self.episodes = iteration, level, episodes
@@ -99,16 +103,6 @@ class VideoRecorder:
                                ([1., .1, .1, 1.], [.1, 1., .1, 1.], [.1, .4, 1., 1.])):
             geom = self._geom(mujoco.mjtGeom.mjGEOM_ARROW, [0, 0, 0], target, color)
             mujoco.mjv_connector(geom, mujoco.mjtGeom.mjGEOM_ARROW, .006, target, target + .12 * axis)
-        # World-fixed grid provides a visible reference when the camera follows
-        # the chassis. These scene decorations have no collision or dynamics.
-        center = np.floor(data.xpos[self.spec.base_body, :2])
-        for offset in range(-3, 5):
-            for axis in range(2):
-                start = np.array([center[0] - 3, center[1] - 3, .003])
-                end = np.array([center[0] + 4, center[1] + 4, .003])
-                start[axis] = end[axis] = center[axis] + offset
-                geom = self._geom(mujoco.mjtGeom.mjGEOM_LINE, [0, 0, 0], start, [.5, .55, .6, 1.])
-                mujoco.mjv_connector(geom, mujoco.mjtGeom.mjGEOM_LINE, 1., start, end)
 
     def __call__(self, sim, goals, step, metrics):
         failed = bool(metrics["failed"][0])
@@ -120,20 +114,18 @@ class VideoRecorder:
             return
         data = sim.data[0]
         goal = goals[0].detach().cpu().numpy().astype(float)
-        self.camera.lookat[:] = data.xpos[self.spec.base_body] + [0, 0, .25]
-        self.renderer.update_scene(data, camera=self.camera)
+        self.camera.lookat[:] = data.xpos[self.spec.base_body] + getattr(self, "camera_offset", [0, 0, .25])
+        visual_scene = getattr(self, "visual_scene", None)
+        if visual_scene is not None:
+            visual_scene.update(data)
+            self.renderer.update_scene(visual_scene.data, camera=self.camera,
+                                       scene_option=visual_scene.option)
+        else:
+            self.renderer.update_scene(data, camera=self.camera)
         self._markers(data, goal)
         picture = self.Image.fromarray(self.renderer.render())
         draw = self.ImageDraw.Draw(picture)
-        status = "FAILED" if failed else "HELD SUCCESS" if bool(metrics["held_success"][0]) else "TRACKING"
-        lines = [f"Policy iteration {self.iteration} | episode {self.episode}/{self.episodes} | level {self.level}",
-                 f"t={step * self.dt:.2f}/{self.steps * self.dt:.2f}s | {status}",
-                 f"TCP error: {float(metrics['position_error_m'][0]) * 100:.1f} cm | "
-                 f"orientation: {math.degrees(float(metrics['orientation_error_rad'][0])):.1f} deg"]
-        if len(goal) >= 11:
-            lines.append(f"Base command: vx={goal[7]:+.3f} vy={goal[8]:+.3f} m/s "
-                         f"wz={goal[9]:+.3f} rad/s | {'follow' if goal[10] > .5 else 'world target'}")
-        lines.append("Green sphere: target | orange: TCP | RGB arrows: target orientation")
+        lines = self.annotation_lines(goal, step, metrics)
         line_height = max(22, picture.height // 30)
         draw.rectangle((0, 0, picture.width, len(lines) * line_height + 12), fill=(18, 23, 32))
         for i, line in enumerate(lines):
@@ -143,6 +135,18 @@ class VideoRecorder:
             self.writer.append_data(self.last_frame)
             self.frames += 1
             self.total_frames += 1
+
+    def annotation_lines(self, goal, step, metrics):
+        status = "FAILED" if bool(metrics["failed"][0]) else "HELD SUCCESS" if bool(metrics["held_success"][0]) else "TRACKING"
+        lines = [f"Policy iteration {self.iteration} | episode {self.episode}/{self.episodes} | level {self.level}",
+                 f"t={step * self.dt:.2f}/{self.steps * self.dt:.2f}s | {status}",
+                 f"TCP error: {float(metrics['position_error_m'][0]) * 100:.1f} cm | "
+                 f"orientation: {math.degrees(float(metrics['orientation_error_rad'][0])):.1f} deg"]
+        if len(goal) >= 11:
+            lines.append(f"Base command: vx={goal[7]:+.3f} vy={goal[8]:+.3f} m/s "
+                         f"wz={goal[9]:+.3f} rad/s | {'follow' if goal[10] > .5 else 'world target'}")
+        lines.append("Green sphere: target | orange: TCP | RGB arrows: target orientation")
+        return lines
 
     def end_episode(self):
         # Pause on the last state so failures/episode transitions are easy to see.
@@ -172,6 +176,8 @@ def main():
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
     parser.add_argument("--camera-distance", type=float, default=2.8)
+    parser.add_argument("--appearance", choices=("visual", "collision"), default="visual",
+                        help="URDF surface meshes (default), or collision geometry")
     args = parser.parse_args()
     if min(args.episodes, args.fps, args.width, args.height) < 1:
         parser.error("episodes, fps and frame dimensions must be positive")
@@ -220,7 +226,7 @@ def main():
                             macro_block_size=1, ffmpeg_log_level="error") as writer:
         recorder = VideoRecorder(model, spec, writer, width=args.width, height=args.height,
             fps=args.fps, dt=cfg.sim.dt, steps=steps, iteration=ck["iteration"], level=level,
-            episodes=args.episodes, distance=args.camera_distance)
+            episodes=args.episodes, distance=args.camera_distance, appearance=args.appearance)
         try:
             for episode in range(args.episodes):
                 seed = args.seed + episode
@@ -243,7 +249,8 @@ def main():
     report = dict(checkpoint=str(checkpoint), checkpoint_iteration=ck["iteration"],
         video=str(video), fps=args.fps, frames=recorder.total_frames,
         duration_s=recorder.total_frames / args.fps, episode_end_pause_s=1.,
-        command=args.command, physics_hash=ck["manifest"]["physics_hash"], episodes=results)
+        command=args.command, appearance=args.appearance, floor="white_light_gray_grid",
+        physics_hash=ck["manifest"]["physics_hash"], episodes=results)
     video.with_suffix(".json").write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
     print(json.dumps(dict(video=str(video), report=str(video.with_suffix('.json')),
                           checkpoint_iteration=ck["iteration"], duration_s=report["duration_s"])), flush=True)

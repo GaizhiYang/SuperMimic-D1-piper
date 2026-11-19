@@ -1,277 +1,279 @@
-# SuperMimic-Agent-WFArm
+# SuperMimic-D1-Piper
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.x-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org/)
-[![MuJoCo](https://img.shields.io/badge/Simulation-MuJoCo-009688)](https://mujoco.org/)
-[![Status](https://img.shields.io/badge/Status-Exploratory-orange)](docs/PROJECT_ANALYSIS_CN.md)
+**简体中文** · [English](README.md) · [许可证](LICENSE) · [来源与致谢](NOTICE.md)
 
-**[English](README.md) · 简体中文**
+利用可微世界模型学习轮腿式移动操作。
+本项目将 SuperMimic 的学习方法应用于 D1 平台：机器人包含四条腿、四个轮子和一条六轴
+Piper 机械臂。统一策略控制全部 22 个执行器，跟踪末端位姿，并在启用时跟踪底盘速度指令。
 
-**这是一个面向四轮足机械臂控制的探索类开源项目，欢迎大家交流与共同探索。**
-
-项目围绕一个问题展开：轮、腿和机械臂共享同一套机器人动力学时，能否先学到一个可微的世界模型，再利用这个模型训练末端控制策略？代码覆盖轮腿臂协同控制、固定底盘六轴机械臂，以及参考动作生成与物理筛选。G1 动作跟踪代码保留为技术来源，四轮足机械臂是主要研究对象。
-
-学习机制来自 [SuperMimic](https://arxiv.org/abs/2610.28480)：从真实仿真转移学习动力学，通过短时域想象展开和时间反向传播优化策略。[MimicAgent](https://arxiv.org/abs/2609.24145) 提供了参考生成的思路：将任务和阶段计划转成轨迹程序，再根据检查结果修正。
-
-本仓库发布训练、评估、参考生成代码和使用说明。机器人 URDF、网格、标定、训练数据、模型权重、视频及内部实验文档不随仓库分发。没有私有机器人资源也可以运行算法单元测试；完整机器人仿真需要另外提供有权使用的资产。
-
----
-
-**图片**：<img width="1440" height="540" alt="fixed_arm_showcase_contact_sheet" src="https://github.com/user-attachments/assets/fec88e0f-fa53-402b-a322-af3309023700" />
-
-
-**视频**：https://www.bilibili.com/video/BV1jcWb6BEKQ/?spm_id_from=333.1387.homepage.video_card.click&vd_source=3e0503d2af778f71bc1d1405b8a87d65
-
-
-**流程**：
-在这个项目里，教师就是专家示范数据生成器，学生就是待训练的控制策略，世界模型负责学习动力学。 三者通过下面的流程连接起来：
-1. 收集数据：专家示范和策略自身尝试
-   MimicAgent 轨迹程序提出期望运动，示范控制器通过电机指令在 MuJoCo 中执行。经过物理筛选的实际“状态、动作、下一状态”成为专家示范。当前策略也会在 MuJoCo 中运行，采集自身执行的数据。
-2. 训练世界模型：学习动作会造成什么结果
-   世界模型利用实际状态转移，学习“当前状态＋动作 → 下一状态”，例如某个关节位置指令会让机械臂的角度、速度怎样变化。它负责预测运动后果。
-3. 训练控制策略：学习应该输出什么动作
-   学生策略根据当前状态和目标输出动作，通过世界模型预测接下来的运动，再根据末端误差等任务奖励，把梯度经过世界模型反传到策略参数。此时暂时固定世界模型参数，更新策略。专家示范动作还可以提供模仿辅助，帮助策略学习。
-4. 回到 MuJoCo 检验：检查策略实际是否有效
-   让学到的策略实际控制机械臂，检查到达和跟踪是否成功、误差多大、是否碰撞或越界。专家能完成的动作，需要由学生独立完成才算学会；世界模型预测准确，也需要经过实际控制检验。最终独立测试数据保持隔离，不用于训练。
-
-
-
----
-
-
-## 项目名称
-
-- **SuperMimic**：学习可微动力学，并通过 BPTT 优化控制策略。
-- **Agent**：保留任务、阶段计划、轨迹代码和诊断反馈的参考生成接口。目前由 coding agent 通过文件提交程序，尚未接入持续运行的外部 LLM 服务。
-- **WFArm**：四轮足平台及其机械臂，同时研究整机协同和固定底盘机械臂任务。
+主要流程涵盖参考生成、连续 TCP 轨迹指令、CPU 或 GPU 仿真、世界模型训练、策略优化、
+物理评估和视频录制。仓库还保留固定底盘机械臂实验和继承的 G1 实现，作为独立研究分支。
+本项目是独立的研究适配，不声称复现原论文的基准结果或完成实机验证。
 
 ## 项目包含什么
 
-| 模块 | 任务和接口 | 主要代码 |
-|---|---|---|
-| 轮腿臂全身控制 | 一个 Actor 联合输出 12 路腿部位置、4 路轮速和 6 路机械臂位置命令 | `src/supermimic/wf/` |
-| 固定底盘机械臂基线 | TCP 位姿到达与轨迹跟踪，输出六个限速关节位置目标 | `frameworks/fixed_base_arm/arm_smc/` |
-| 结构化机械臂控制 | 碰撞检查的到达参考、学习的任务反馈增益、保留的姿态策略 | `frameworks/fixed_base_arm/variants/supermimic_robust_control_v7/arm_smc/` |
-| 参考生成前端 | 任务描述与计划、轨迹程序、运动学检查、反馈修正、真实物理筛选 | `src/supermimic/mimicagent/` |
-| 训练与评估 | 模型拟合、BC 辅助、BPTT、Critic、独立目标评估和失败诊断 | 各模块的训练和评估入口 |
+| 组件 | 实现 |
+|---|---|
+| 全身控制 | 一个 Actor 输出 12 路腿部位置指令、4 路轮速指令和 6 路机械臂位置指令 |
+| 可微动力学 | 学习仿真状态转移，再通过短时域想象展开，以 BPTT 优化 Actor |
+| 参考生成 | 电机驱动的 MuJoCo 执行、物理筛选及可选的模仿辅助 |
+| 移动 TCP 指令 | 对关节样条做碰撞检查，再转换为末端位置与姿态轨迹 |
+| 仿真后端 | 原生 CPU MuJoCo，以及用于 GPU 训练的 MuJoCo Warp 批量采集 |
+| 评估 | 位姿到达、轨迹跟踪、物理失败、摩擦变化和执行器消融 |
+| 录像 | 完整连续轨迹、机器人原始可视网格、明亮的白灰地面，以及目标和实际 TCP 轨迹 |
+| 导出 | 包含 Actor 和观测变换的 TorchScript 推理封装 |
 
-全身策略与固定底盘策略是两种不同设置。前者研究自由底盘上的轮腿臂协同，后者将底盘和腿部真正固定，只保留六个机械臂自由度。固定底盘的结构化分支同时使用参考规划和解析雅可比反馈；评估和介绍时应保留这一前提。
+WF 示例配置的控制周期为 20 ms（50 Hz），物理步长为 5 ms。位置指令使用配置中的
+执行器缩放系数，并非关节力矩。四元数输入采用 **wxyz** 顺序。
 
-本项目仍处于探索阶段。仓库提供算法和工程实现，不将局部仿真表现扩展成全工作空间或实机能力的结论。
+## 学习流程
 
-## MimicAgent × SuperMimic：参考生成与策略学习的联动
+1. 生成参考运动，并在 MuJoCo 中执行对应的电机指令。通过筛选的状态/动作转移与
+   TCP 目标路径分别保存。
+2. 在物理仿真中运行当前策略，采集更多状态转移，再用回放窗口拟合可微动力学模型。
+3. 更新策略时冻结世界模型参数，通过想象展开中的任务奖励反向传播梯度。
+   可选的行为克隆和参考跟踪损失为 Actor 提供辅助。
+4. 在 MuJoCo 中评估 Actor。课程与守卫检查通过真实物理执行判断进展及候选更新的效果。
 
-两者通过参考数据接口连接：
+教师能执行某条参考运动，不代表学到的 Actor 已经能完成该任务。TCP 轨迹库提供目标指令
+及名义上的运动学可行性，其中的路径并非策略成功执行的记录。Actor 推理不需要学到的
+世界模型或离线教师。
 
-1. **MimicAgent 风格前端**根据任务和阶段计划生成轨迹程序，执行运动学检查，并将诊断反馈交给下一版程序。
-2. **真实物理执行与筛选**将提案转换为电机命令。独立检查通过后，实际状态和动作序列才成为示范数据。
-3. **SuperMimic 风格后端**把这些参考用于模型拟合、可选 BC 和想象状态跟踪辅助，同时继续采集当前学生的真实转移，通过 BPTT 更新策略。
-4. **独立物理评估**检查学生是否完成任务，与参考生成器、离线教师的成绩分别统计。
+## 安装
 
-前端提供参考提案，世界模型与 BPTT 负责策略学习。这是本项目已经接通的技术关系；原论文完整基准和参考生成对最终学生的收益仍需要另行验证。
-
-## 算法原理
-
-### 1. 用真实仿真数据学习世界模型
-
-真实物理引擎负责产生状态转移，神经网络负责拟合可微近似：
-
-$$
-\hat{s}_{t+1}=F_\theta(\hat{s}_t,a_t,\xi).
-$$
-
-$s_t$ 是机器人状态，$a_t$ 是实际执行的命令，$\xi$ 表示摩擦等环境条件。网络预测有界残差，再与显式积分结合。训练采用多步自回归展开，损失包括状态误差和失败概率：
-
-$$
-\mathcal L_{\mathrm{WM}}=\frac1K\sum_{k=1}^{K}
-\left[\frac1m\left\|E(\hat s_{t+k},s_{t+k})\right\|_2^2
-+\beta\operatorname{BCE}(\hat d_{t+k},d_{t+k})\right].
-$$
-
-$E$ 对不同状态量做尺度归一化，$m$ 是误差向量维数；全身分支中 $\beta=0.1$。轮子的累计转角不进入全身模型的状态误差，轮速仍然保留。
-
-### 2. 在模型里展开，在真实物理里检验
-
-可微正运动学提供末端位姿、速度和任务奖励。更新 Actor 时冻结世界模型与 Critic 的参数，同时保留状态和动作到回报的梯度：
-
-$$
-J(\phi)=\mathbb E\left[
-\sum_{t=0}^{H-1}\gamma^t C_t r_{t+1}
-+\gamma^H C_H V_\psi(\hat s_H,g_H,\xi)
-\right],\qquad
-C_t=\prod_{j=1}^{t}(1-\hat d_j).
-$$
-
-Actor 通过 BPTT 提高短时域回报，并可加入 BC 和参考状态跟踪辅助。Critic 用停止梯度的 $\lambda$-return 训练。较短展开减少模型误差积累，终端价值补充时域之外的回报估计。
-
-### 3. 六轴机械臂采用限速位置接口
-
-固定底盘机械臂内部可以输出归一化目标变化率，真正交给下游的是六个关节位置目标：
-
-$$
-q^{\mathrm{cmd}}_{t+1}
-=\operatorname{clip}_{\mathcal Q}
-\left(q^{\mathrm{cmd}}_t+\Delta t\,v_{\max}\,\rho_t\right),
-\qquad \rho_t\in[-1,1]^6.
-$$
-
-结构化分支用有界正增益调整任务空间反馈，经阻尼雅可比映射成关节运动，并保留姿态或规划参考项。具体公式、坐标约定和代码对应关系见[中文项目分析](docs/PROJECT_ANALYSIS_CN.md)。
-
-### 4. 参考必须经过物理执行
-
-```mermaid
-flowchart LR
-  A[任务与阶段计划] --> B[轨迹程序]
-  B --> C[运动学与结构检查]
-  C -->|诊断反馈| B
-  C -->|通过| D[电机驱动的真实物理执行]
-  D -->|独立筛选通过| E[参考数据]
-  E --> F[世界模型与BPTT训练]
-  F --> G[真实物理评估]
-```
-
-通过运动学检查只说明提案满足对应的结构约束。它不能直接作为世界模型的真实状态转移。参考前端将提案与实际执行轨迹分开保存；只有物理筛选通过的数据才能导出为训练示范。
-
-## 目录结构
-
-```text
-src/supermimic/
-  wf/                     轮腿臂仿真、任务、模型、网络和训练
-  mimicagent/             参考程序执行、检查、反馈和物理筛选
-  world_model/            通用动力学网络与状态处理
-  imagination/            想象展开、Actor目标和Critic目标
-  kinematics/             可微正运动学
-frameworks/fixed_base_arm/
-  arm_smc/                六轴机械臂基线
-  variants/supermimic_robust_control_v7/arm_smc/
-                          结构化机械臂控制、规划和训练
-configs/examples/         不含私有机器人参数的示例配置
-examples/mimicagent/       轨迹程序与阶段计划示例
-scripts/                  精选训练、数据处理与评估入口
-tests/                    发布版测试
-tools/                    资产检查、发布准备和内容审查
-third_party/              上游来源与致谢
-docs/                     项目分析、私有资产说明和仓库简介
-```
-
-本地研究目录中的历史实验和过程记录不属于 GitHub 发布内容。
-
-## 环境与依赖
-
-WF 路径使用 Python 3.11 或 3.12。已使用的本地 CPU 环境为 Python 3.11、PyTorch 2.7、MuJoCo 3.10、NumPy 1.26。CUDA 用于加速 Torch 学习；WF 参考后端的真实物理采集在 CPU 上执行。
+使用 Linux 和 Python **3.11 或 3.12**。录像和 GPU 流程已在 MuJoCo **3.16**、
+PyTorch **2.7**、Python **3.11** 环境中检查。建议使用独立环境：
 
 ```bash
-git clone https://github.com/Robot-Nav/SuperMimic-Agent-WFArm.git
-cd SuperMimic-Agent-WFArm
+git clone https://github.com/GaizhiYang/SuperMimic-D1-piper.git
+cd SuperMimic-D1-piper
 python3.11 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install -e '.[dev]'
+python -m pip install -e '.[dev,media]' 'mujoco~=3.16.0'
 ```
 
-| 依赖 | 用途 | 安装范围 |
-|---|---|---|
-| PyTorch | 世界模型、策略、自动微分与优化 | 基础依赖 |
-| MuJoCo | 真实动力学、接触检测和模型读取 | 基础依赖 |
-| NumPy、SciPy | 数据处理、数值计算和旋转变换 | 基础依赖 |
-| pytest | 测试 | `.[dev]` |
-| OSQP、quadprog | 离线 QP 教师及约束诊断 | `.[teacher]` |
-| imageio、imageio-ffmpeg、matplotlib | 可选录像和绘图 | `.[media]` |
-| mjlab、MuJoCo Warp、Warp 及动作数据工具 | 保留的 G1 路径 | 单独 Python 3.12 环境中的 `.[g1]` |
-
-使用 GPU 时先安装与显卡驱动匹配的 PyTorch。G1 额外依赖包含固定的 mjlab 提交及较新的仿真栈，不需要为运行 WF 基础代码安装它们。
-
-## 运行步骤
-
-### 1. 先运行不需要机器人模型的测试
+使用 NVIDIA GPU 训练时，先安装与驱动匹配、支持 CUDA 的 PyTorch，再安装 GPU 后端：
 
 ```bash
-python -m pytest -q tests/test_release_core.py
+python -m pip install -e '.[dev,media,gpu]'
 ```
 
-测试覆盖状态积分、Actor/Critic 目标、梯度传播、私有资产路径和发布边界，不把测试通过等同于机器人任务通过。
+| 可选依赖组 | 用途 |
+|---|---|
+| `dev` | pytest |
+| `media` | MP4 编码、图像标注和绘图 |
+| `gpu` | MuJoCo 3.16、MuJoCo Warp 和 Warp |
+| `teacher` | 其他全身控制实验使用的可选 OSQP/quadprog 教师 |
+| `g1` | 继承的独立 G1 实现；D1/Piper 训练无需安装 |
 
-### 2. 接入有权使用的机器人资产
+主要的速度指令参考生成器和 TCP 轨迹生成器不需要 `teacher` 依赖组。
+即使训练采集使用 Warp，评估和录像仍使用原生 CPU MuJoCo。无窗口录像默认采用 EGL，
+运行机器需要可用的 OpenGL/EGL 环境。
+
+## 机器人模型
+
+当前源码包含 `wf-arm-tbot/`，其中提供 URDF、其引用的碰撞与可视网格、机器人配置及
+TCP 定义。资产解析器会自动找到该目录。也可以显式指定它，或使用外部副本：
 
 ```bash
-export WFARM_ASSET_DIR=/path/to/authorized/wf-arm-tbot
+export WFARM_ASSET_DIR="$PWD/wf-arm-tbot"
 python tools/check_assets.py
 ```
 
-资产目录包含 URDF、其引用的碰撞网格、关节元信息和 TCP 标定。固定底盘任务还需要私有工作限位配置。具体文件契约见[私有资产说明](docs/PRIVATE_ASSETS.md)。这些文件不应添加到 Git。
+预期目录结构：
 
-### 3. 检查轮腿臂训练链路
+```text
+wf-arm-tbot/
+  urdf/wf-arm-tbot.urdf
+  meshes/
+  config/robot.json
+  config/robot_calibration.json
+  config/operating_limits.json     # 固定底盘机械臂适配器也会使用
+```
+
+显式传入的 `--asset-dir` 或配置中的 `asset_dir` 优先于环境变量。评估时会核对模型与
+checkpoint 的物理指纹，因此应使用与训练相同的资产和执行器配置。
+资产是否可用与是否允许再分发是两个问题，详见[许可与致谢](#许可与致谢)。
+
+## 快速开始
+
+激活环境后，在仓库根目录运行以下命令。
+
+### 检查代码和 CPU 训练流程
 
 ```bash
+# 无需加载机器人模型的核心测试。
+python -m pytest -q -m 'not private_assets' tests/test_release_core.py
+
+# 小规模集成运行：4 个环境，64 次迭代。
 python -m supermimic.wf.train --smoke --device cpu --output outputs/wf_smoke
 ```
 
-正式实验可以从 `configs/examples/wf_train.json` 复制配置，再调整数据、设备、训练预算及评估设置：
+冒烟运行用于检查训练流程，不验证策略是否收敛。进行更长的 CPU 实验时，可使用或复制
+`configs/examples/wf_train.json`，并设置新的输出目录：
 
 ```bash
 python -m supermimic.wf.train --config configs/examples/wf_train.json
 ```
 
-示例只是实验起点，未附带已经训练好的策略。完整接续使用 `--resume`；`--warm-start` 转移的状态范围不同，不能混为同一种恢复方式。
+### 训练底盘速度指令与移动 TCP 目标
 
-录制已保存策略的视频（无窗口，默认 CPU 推理与物理、EGL 渲染）：
+GPU 流水线包含以下阶段：
+
+| 阶段 | 工作 |
+|---|---|
+| `0` | 检查依赖、资产、CUDA，以及 Warp/CPU 一致性 |
+| `1` | 生成经过物理筛选的参考数据和 TCP 轨迹库 |
+| `2` | 参考预训练、在线采集、动力学拟合，以及 Actor/Critic 更新 |
+| `3` | 在 MuJoCo 中评估各课程等级、参考验证集、摩擦变化和消融设置 |
+| `4` | 导出 TorchScript |
+
+小规模 GPU 集成运行：
 
 ```bash
-python -m pip install 'imageio>=2.30,<3' 'imageio-ffmpeg>=0.5,<1'
-python -m supermimic.wf.play --checkpoint outputs/wf_cmd_gpu --episodes 3 --level 0
+CONFIG=configs/examples/wf_cmd_smoke.json \
+REF_COUNT=10 TRAJ_PER_LEVEL=4 WORKERS=4 \
+bash scripts/wf_cmd_pipeline.sh 0 4
 ```
 
-视频及评估 JSON 默认保存在训练目录的 `videos/` 下。可传单个 checkpoint 文件，
-使用 `--video path.mp4` 指定输出，或添加 `--command 0.1 0 0` 查看底座前进时的末端追踪。
-更多选项见[录像说明](docs/WF_COMMAND_TRAINING_CN.md#录制策略视频)。
-
-### 4. 检查固定底盘六轴机械臂
-
-在仓库根目录运行：
+使用完整预设：
 
 ```bash
+CUDA_VISIBLE_DEVICES=0 WORKERS=8 bash scripts/wf_cmd_pipeline.sh 0 4
+```
+
+默认配置文件名为 `wf_cmd_gpu4096.json`，但当前实际设置为 **8192 个环境、30000 次迭代**。
+开始完整训练前，请根据硬件调整环境数、批量大小和参考生成进程数。
+小规模速度指令预设同样需要 CUDA GPU；CPU 检查请使用 `train --smoke`。
+
+运行范围包含阶段 `1` 时，会在 `outputs/` 下创建时间戳一致的参考目录和训练目录。
+脚本会打印路径，并在训练目录保存 `pipeline_config.json`。继续同一次运行时使用这份配置：
+
+```bash
+# 将此值替换为流水线打印的训练目录。
+RUN_DIR=outputs/wf_cmd_gpu_YYYYMMDD_HHMMSS_SUFFIX
+CONFIG="$RUN_DIR/pipeline_config.json" bash scripts/wf_cmd_pipeline.sh 2 3
+```
+
+### 评估 checkpoint
+
+评估和导出模块需要传入 checkpoint **文件**：
+
+```bash
+python -m supermimic.wf.evaluate \
+  --checkpoint "$RUN_DIR/ckpt_latest.pt" --level 3 --episodes 64 \
+  --output "$RUN_DIR/eval_level3.json"
+
+python -m supermimic.wf.evaluate \
+  --checkpoint "$RUN_DIR/ckpt_latest.pt" --static-goals --level 3 \
+  --output "$RUN_DIR/eval_static.json"
+```
+
+若 checkpoint 配置了 TCP 轨迹库，评估默认使用该库。`--static-goals` 则选择单点到达目标。
+其他选项包括 `--ablation all`、`--friction`，以及配合 `--reference-split validation`
+使用的 `--reference-library`。移动训练目录时，请确保引用的轨迹库仍可访问。
+
+应同时报告轨迹跟踪成功率、位置/姿态 RMS 误差和物理失败率。跟踪统计将失败后未执行的
+步数计为未命中。较低的动力学模型误差、教师成功或良好的录像观感，都不能单独证明策略
+表现。评估泛化能力应使用独立的留出请求。
+
+### 录制连续轨迹
+
+对于带速度指令、且已生成 TCP 轨迹库的 checkpoint：
+
+```bash
+# 录制静止、前进和缓慢转向三个场景。
+bash scripts/wf_record_trajectories.sh "$RUN_DIR"
+
+# 设置底盘前向/侧向速度及偏航角速度：m/s、m/s、rad/s。
+bash scripts/wf_record_trajectories.sh "$RUN_DIR" \
+  --scenario turn --command 0.2 0 0.03
+
+# 放慢 TCP 路径，并选取三条不同的大范围路径。
+bash scripts/wf_record_trajectories.sh "$RUN_DIR" \
+  --scenario stationary --speed 0.4 --clips 3
+```
+
+录像程序按空间范围选择完整路径，先平滑接近起点，再逐控制步更新目标。
+单段录像中不会随机切换轨迹窗口。默认使用 level 3、0.75 倍路径速度、1280×720 分辨率和
+30 FPS。视频按仿真时间播放，不受渲染速度影响。
+
+`--command VX VY WZ` 覆盖所选场景的底盘指令；`--speed` 单独控制 TCP 轨迹播放速度。
+默认的 `--frame follow` 按配置的底座跟随坐标系搬移目标；
+`--scenario stationary --frame world` 将路径固定在初始世界位姿，要求底盘速度指令为零。
+
+默认显示原始 URDF 可视网格及材质，地面为明亮的白色/浅灰色网格。
+使用 `--appearance collision` 可查看碰撞几何。渲染使用独立模型，不改变策略运行的物理模型。
+青色表示完整目标路径，绿色表示已下发的目标轨迹，橙色表示实际 TCP 轨迹。
+
+每段录像在 `"$RUN_DIR/videos/trajectories_<timestamp>/"` 下保存 MP4、JSON 指标、
+控制频率的 NPZ 记录和 PNG 预览。这些预览复用训练轨迹库，不衡量未见轨迹上的表现。
+单点目标录像请查看 `python -m supermimic.wf.play --help`。
+更多选项见[录像指南](docs/WF_COMMAND_TRAINING_CN.md#录制连续末端轨迹视频)。
+
+### 导出推理模型
+
+```bash
+python -m supermimic.wf.export \
+  --checkpoint "$RUN_DIR/ckpt_latest.pt" --output "$RUN_DIR/policy_inference.pt"
+```
+
+对于带速度指令的 WF 策略，封装接收规范的 57 维状态、22 维上一步实际执行动作，以及
+11 维世界系目标：TCP 位置、wxyz 四元数、底盘 vx/vy/wz 和指令模式标志。
+相邻的导出 JSON 描述实际接口、关节顺序、执行器缩放系数和物理指纹。
+调用方负责维护实际执行动作的历史，并完成目标坐标系搬移。导出模型不包含仿真器或硬件 I/O。
+导出程序拒绝覆盖已有的模型或元数据文件。完整流水线已生成 `policy.pt`；续训后再次
+导出时，请选择新的文件名。
+
+## 其他实验与源码结构
+
+```text
+src/supermimic/wf/        全身模型、仿真、训练、评估和录像
+src/supermimic/mimicagent/ 任务/计划/程序形式的参考生成前端
+src/supermimic/world_model/, imagination/, kinematics/
+                         共用的学习及可微运动学工具
+frameworks/fixed_base_arm/ 六轴基线和结构化控制器变体
+configs/examples/        CPU 和 GPU 实验预设
+scripts/                 流水线和录像封装
+tests/                   核心、物理、轨迹和渲染检查
+wf-arm-tbot/             机器人描述、网格和模型配置
+outputs/                 生成的运行结果；Git 忽略此目录
+docs/                    详细流程与算法说明
+```
+
+固定底盘机械臂基线有独立入口：
+
+```bash
+python tools/check_assets.py --fixed-arm
 PYTHONPATH=src:frameworks/fixed_base_arm python -m arm_smc.train \
   --config configs/examples/fixed_arm_smoke.json
 ```
 
-该配置生成小规模独立参考集并检查训练和评估流程。研究控制效果时需要增加预算，并保留独立验证和测试。结构化分支保留前序策略，可能需要本地训练的源检查点和目标编码器；仓库不分发这些权重。
+固定机械臂的结构化变体结合学习组件、规划和解析雅可比反馈，与统一全身 Actor 分开实现。
+详见[固定机械臂概览](frameworks/fixed_base_arm/README.md)、
+[算法说明](docs/PROJECT_ANALYSIS_CN.md)和[脚本索引](scripts/README.md)。
+继承的 G1 代码需要独立的环境和数据。
 
-### 5. 检查参考生成与训练接入
+显式运行依赖机器人模型的 WF 测试：
 
 ```bash
-python scripts/wf_mimicagent_pilot.py \
-  --output outputs/mimicagent_reference --terminal-feedback
-
-python scripts/wf_mimicagent_smoke.py \
-  --library outputs/mimicagent_reference/physical_library \
-  --output outputs/mimicagent_training_check
+WFARM_ASSET_DIR="$PWD/wf-arm-tbot" python -m pytest -q tests
 ```
 
-末段反馈使用现有离线教师，属于本项目的参考生成适配。导出器校验执行数据和物理配置，并按独立请求保留训练/验证分割。教师轨迹可行不代表学生已经学会任务。
+## 许可与致谢
 
-## 评估应记录什么
+项目代码采用 [MIT 许可证](LICENSE)，并保留上游版权声明。
+本项目在 Yuxi Liu / CuboiLeo 的独立实现
+[SuperMimic-Reproduced](https://github.com/CuboiLeo/SuperMimic-Reproduced)
+基础上扩展，借鉴 SuperMimic 的学习方法和 MimicAgent 的参考生成方法。
+作者署名和研究参考文献见 [NOTICE](NOTICE.md)。
 
-到达任务检查末尾连续保持的位姿和速度误差；跟踪任务检查请求轨迹中满足误差要求的帧比例。物理失败单独统计，失败后未执行的请求帧仍应留在跟踪分母中。最终测试不能参与世界模型、BC、Actor 更新或检查点选择。
+代码许可证不额外授予第三方机器人资源的使用权。随仓库提供的 D1 描述在
+[package.xml](wf-arm-tbot/d1_description/package.xml) 中仍有未填写的许可证声明；
+请向来源方确认模型和网格的再分发条款。请保留各资源的独立声明，包括 articulation
+适配器中的 Apache-2.0 声明。
 
-世界模型误差下降、训练预算完成、参考筛选通过和最终策略成功分别代表不同结果。代码保留了动作响应检查、真实物理评估和回放边界处理，便于分析这些差异。底盘以 0.5–1.0 m/s 行进时的操作能力需要单独实验，不能从静态机械臂或 G1 动作跟踪结果推得。
-
-## 协议、致谢与交流
-
-### 致谢
-
-- 感谢 **SuperMimic 作者团队**提出可微世界模型与 BPTT 的学习框架，为本项目的动力学建模和策略训练提供基础。
-- 感谢 **MimicAgent 作者团队**提出提示词到参考轨迹、结构检查和诊断修正的流程，为本项目的参考生成前端提供思路。
-- 感谢 **Yuxi Liu / CuboiLeo** 的 SuperMimic-Reproduced 实现，以及本项目使用的仿真、学习和数值计算库的维护者。
-
-论文全名、作者和项目链接列于 [NOTICE](NOTICE.md)。
-
-代码采用 [MIT 协议](LICENSE)，保留原有版权声明。上游来源和依赖致谢见 [NOTICE](NOTICE.md) 与 [third_party](third_party/README.md)。机器人资产和本地实验产物不在本仓库的软件授权范围内。
-
-- [SuperMimic 原论文](https://arxiv.org/abs/2610.28480)
-- [MimicAgent 原论文](https://arxiv.org/abs/2609.24145)
-- [SuperMimic-Reproduced](https://github.com/CuboiLeo/SuperMimic-Reproduced)
-
-欢迎通过 [Issues](https://github.com/Robot-Nav/SuperMimic-Agent-WFArm/issues) 交流训练现象、复现问题和控制方法。提交问题时附上代码版本、软件环境、配置及失败描述，请勿附带保密机器人文件或访问凭据。
-
-[English](README.md) · [中文项目分析](docs/PROJECT_ANALYSIS_CN.md)
+反馈问题请使用 [Issues](https://github.com/GaizhiYang/SuperMimic-D1-piper/issues)，
+并附上代码版本、软件版本、配置及简短复现步骤。生成的参考、日志、checkpoint 和视频
+应放在 `outputs/` 下，该目录不纳入 Git 跟踪。
